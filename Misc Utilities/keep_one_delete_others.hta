@@ -1,0 +1,252 @@
+<html>
+<head>
+<title>Keep One — Delete Others (Permanent)</title>
+<HTA:APPLICATION
+  ID="app"
+  APPLICATIONNAME="Keep One — Permanent Delete"
+  SINGLEINSTANCE="yes"
+  SCROLL="no"
+  BORDER="thin"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+  SYSMENU="yes"
+/>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; margin:14px; }
+  .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap: wrap; }
+  label { min-width: 72px; }
+  input[type=text]{ width:520px; padding:6px; }
+  button { padding:8px 12px; cursor:pointer; }
+  #log { border:1px solid #ccc; padding:8px; height:220px; overflow:auto; white-space:pre-wrap; margin-top:6px; }
+  #progress { margin-left:8px; color:#555; }
+</style>
+<script language="JScript">
+(function(){
+  var fso   = new ActiveXObject("Scripting.FileSystemObject");
+  var shell = new ActiveXObject("Shell.Application");
+
+  // Image types we manage. Only these are considered for deletion.
+  var IMAGE_EXTS = { ".jpg":1, ".jpeg":1, ".png":1, ".heic":1, ".webp":1, ".tif":1, ".tiff":1, ".bmp":1, ".dng":1 };
+
+  var state = {
+    root: "", subfolders: [], idx: 0,
+    reuse: true, confirmDelete: true
+  };
+
+  function log(msg){ var el = document.getElementById("log"); el.innerText += msg + "\n"; el.scrollTop = el.scrollHeight; }
+  function setProg(){
+    document.getElementById("progress").innerText =
+      state.subfolders.length ? ("Folder " + (state.idx+1) + " of " + state.subfolders.length) : "";
+  }
+  function extLower(p){ var i=p.lastIndexOf("."); return i>=0 ? p.substr(i).toLowerCase() : ""; }
+  function samePath(a,b){ return (a||"").toLowerCase()===(b||"").toLowerCase(); }
+
+  function chooseRoot(){
+    try{
+      var folder = shell.BrowseForFolder(0, "Choose ROOT (contains subfolders)", 0x001);
+      if (!folder) return;
+      document.getElementById("root").value = folder.Self.Path;
+    }catch(e){ alert("Picker failed: " + e.message); }
+  }
+
+  // Return arrays of image files and non-JPG image files for a folder
+  function analyseFolderImages(folderPath){
+    var imgs = [], nonJpg = [];
+    try{
+      var files = new Enumerator(fso.GetFolder(folderPath).Files);
+      for (; !files.atEnd(); files.moveNext()){
+        var fp = files.item().Path;
+        var ext = extLower(fp);
+        if (IMAGE_EXTS[ext]){
+          imgs.push(fp);
+          if (ext !== ".jpg" && ext !== ".jpeg") nonJpg.push(fp);
+        }
+      }
+    }catch(e){}
+    return { images: imgs, nonJpg: nonJpg };
+  }
+
+  function scan(){
+    var root = document.getElementById("root").value.replace(/\"/g,"").trim();
+    state.reuse = document.getElementById("reuse").checked;
+    state.confirmDelete = document.getElementById("confirmDel").checked;
+
+    if (!root || !fso.FolderExists(root)) { alert("Root does not exist."); return; }
+
+    var candidates = [];
+    var e = new Enumerator(fso.GetFolder(root).SubFolders);
+    for (; !e.atEnd(); e.moveNext()){
+      var sf = e.item();
+      var analysis = analyseFolderImages(sf.Path);
+      // PROBLEM subfolder: >1 image OR any non-JPG image present
+      if (analysis.images.length > 1 || analysis.nonJpg.length > 0){
+        candidates.push(sf.Path);
+      }
+    }
+    candidates.sort();
+
+    state.root = root;
+    state.subfolders = candidates;
+    state.idx = 0;
+    document.getElementById("log").innerText = "";
+    log("Scanned " + candidates.length + " subfolders needing attention.");
+    setProg();
+
+    if (candidates.length) openCurrent();
+    else log("Nothing to do 🎉");
+  }
+
+  function listFirstImage(folder){
+    try{
+      var files = new Enumerator(fso.GetFolder(folder).Files);
+      for (; !files.atEnd(); files.moveNext()){
+        var fp = files.item().Path;
+        if (IMAGE_EXTS[extLower(fp)]) return fp;
+      }
+    }catch(e){}
+    return null;
+  }
+
+  // Find Explorer window currently showing a specific folder
+  function findExplorerFor(folderPath){
+    try{
+      var wins = shell.Windows();
+      for (var i=0; i<wins.Count; i++){
+        var w = wins.Item(i); if (!w) continue;
+        try{
+          var doc = w.Document;
+          if (!doc || !doc.Folder) continue;
+          var shown = doc.Folder.Self.Path;
+          if (samePath(shown, folderPath)) return w;
+        }catch(e){}
+      }
+    }catch(e){}
+    return null;
+  }
+
+  // Prefer reusing an Explorer that’s already under our root
+  function findAnyExplorer(){
+    try{
+      var wins = shell.Windows();
+      for (var i=0; i<wins.Count; i++){
+        var w = wins.Item(i); if (!w) continue;
+        try{
+          var doc = w.Document;
+          if (!doc || !doc.Folder) continue;
+          var shown = doc.Folder.Self.Path;
+          if (shown && shown.indexOf(state.root)===0) return w;
+        }catch(e){}
+      }
+      for (var j=0; j<wins.Count; j++){
+        var ww = wins.Item(j); if (!ww) continue;
+        try{
+          if (ww.Document && ww.Document.Folder) return ww;
+        }catch(e){}
+      }
+    }catch(e){}
+    return null;
+  }
+
+  function openCurrent(){
+    if (state.idx >= state.subfolders.length){ log("Done."); return; }
+    var folder = state.subfolders[state.idx];
+    var firstImg = listFirstImage(folder);
+
+    if (state.reuse){
+      var w = findAnyExplorer();
+      if (w){
+        try{
+          shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
+          log("Navigated Explorer → " + folder);
+          return;
+        }catch(e){}
+      }
+    }
+    try{
+      if (firstImg){
+        shell.ShellExecute("explorer.exe", "/select,\"" + firstImg + "\"", "", "open", 1);
+      }else{
+        shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
+      }
+      log("Opened: " + folder + "  (Tip: Ctrl+Shift+2 for Large icons)");
+    }catch(e){ log("! Could not open Explorer: " + e.message); }
+  }
+
+  // Exactly ONE image must be selected in the current folder
+  function getSingleSelection(curFolder){
+    try{
+      var wins = shell.Windows();
+      for (var i=0; i<wins.Count; i++){
+        var w = wins.Item(i);
+        if (!w) continue;
+        try{
+          var doc = w.Document;
+          if (!doc || !doc.Folder) continue;
+          var shown = doc.Folder.Self.Path;
+          if (!samePath(shown, curFolder)) continue;
+          var sel = doc.SelectedItems();
+          if (!sel || sel.Count < 1){ alert("Select exactly 1 image in Explorer for:\n" + curFolder); return null; }
+          if (sel.Count > 1){ alert("Please select exactly 1 image (not multiple)."); return null; }
+          var p = sel.Item(0).Path;
+          if (IMAGE_EXTS[extLower(p)]) return p;
+          alert("The selected item is not a supported image. Please pick a single image.");
+          return null;
+        }catch(e){}
+      }
+    }catch(e){}
+    return null;
+  }
+
+  // Permanently delete all OTHER images in the folder
+  function deleteOthers(curFolder, keepPath){
+    var deleted = 0, failed = 0;
+    var keepL = (keepPath||"").toLowerCase();
+    try{
+      var files = new Enumerator(fso.GetFolder(curFolder).Files);
+      for (; !files.atEnd(); files.moveNext()){
+        var fp = files.item().Path;
+        var ext = extLower(fp);
+        if (!IMAGE_EXTS[ext]) continue;       // only touch recognised image types
+        if (fp.toLowerCase() === keepL) continue; // skip the selected one
+        try{
+          fso.DeleteFile(fp, true); // PERMANENT delete
+          deleted++;
+        }catch(e){
+          failed++;
+          log("  ! Delete failed: " + fp + " (" + e.message + ")");
+        }
+      }
+    }catch(e){ log("! Could not enumerate files: " + e.message); }
+    return {deleted: deleted, failed: failed};
+  }
+
+  function reopen(){ openCurrent(); }
+
+  function keepSelected(){
+    if (state.idx >= state.subfolders.length) return;
+    var cur = state.subfolders[state.idx];
+
+    var chosen = getSingleSelection(cur);
+    if (!chosen) return;
+
+    if (state.confirmDelete){
+      var msg = "This will permanently DELETE all other images in:\n\n" + cur +
+                "\n\nKeeping:\n" + chosen + "\n\nContinue?";
+      if (!confirm(msg)) { log("Cancelled."); return; }
+    }
+
+    var res = deleteOthers(cur, chosen);
+    log("Kept  : " + chosen);
+    log("Deleted (permanent): " + res.deleted + (res.failed ? (" | Failed: " + res.failed) : ""));
+
+    // advance to next problem folder
+    state.idx++; setProg();
+    if (state.idx < state.subfolders.length) openCurrent();
+    else log("All done.");
+  }
+
+  function skipFolder(){
+    log("Skipped: " + state.subfolders[state.idx]);
+    state.idx++; setProg();
+    if (state.idx < state.subfolders.length) openCurrent();
+   
