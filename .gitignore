@@ -1,0 +1,16 @@
+cat > .gitignore <<'EOF'
+# Ignore everything
+*
+
+# Allow Git to traverse directories
+!*/
+
+# Keep these
+!.gitignore
+!README.md
+!LICENSE
+
+# Whitelist the code you want
+!**/*.py
+!**/*.hta
+EOF
