@@ -246,7 +246,47 @@
   }
 
   function skipFolder(){
+    if (state.idx >= state.subfolders.length) return;
     log("Skipped: " + state.subfolders[state.idx]);
     state.idx++; setProg();
     if (state.idx < state.subfolders.length) openCurrent();
-   
+    else log("All done.");
+  }
+
+  // Wire up buttons on load
+  window.onload = function(){
+    document.getElementById("browse").onclick = chooseRoot;
+    document.getElementById("scan").onclick = scan;
+    document.getElementById("keep").onclick = keepSelected;
+    document.getElementById("skip").onclick = skipFolder;
+    document.getElementById("reopen").onclick = reopen;
+  };
+})();
+</script>
+</head>
+
+<body>
+  <div class="row">
+    <label for="root">Root</label>
+    <input type="text" id="root" placeholder="C:\Photos\AlbumRoot" />
+    <button id="browse">Browse…</button>
+  </div>
+
+  <div class="row">
+    <label>&nbsp;</label>
+    <label><input type="checkbox" id="reuse" checked /> Reuse an existing Explorer window</label>
+    <label><input type="checkbox" id="confirmDel" checked /> Confirm before permanent delete</label>
+  </div>
+
+  <div class="row">
+    <label>&nbsp;</label>
+    <button id="scan">Scan subfolders</button>
+    <button id="keep">Keep selected image, delete others</button>
+    <button id="skip">Skip folder</button>
+    <button id="reopen">Reopen current folder</button>
+    <span id="progress"></span>
+  </div>
+
+  <div id="log" aria-label="Log output"></div>
+</body>
+</html>
