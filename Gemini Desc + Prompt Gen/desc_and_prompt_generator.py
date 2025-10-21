@@ -25,7 +25,7 @@ import pandas as pd
 # ------------------------------------------------------------------------------
 
 CSV_PATH = Path("products.csv")  # must contain "Code (CM)" and "Name / Description"
-IMAGES_ROOT = Path(r"C:\Roshaan\iCloudSinglesConverted")      # your root with many subfolders
+IMAGES_ROOT = Path(r"C:\Roshaan\converted_renamed_500_singles")      # your root with many subfolders
 OUT_DIR = Path(r".")          # results live here
 OUT_MASTER_JSON = OUT_DIR / "all_results.json"
 OUT_MASTER_CSV  = OUT_DIR / "all_results.csv"
