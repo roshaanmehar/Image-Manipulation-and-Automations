@@ -1,27 +1,37 @@
-"""
-main.py — Cooksmart Nano Banana Image Generator (3-SKU Test)
-Author: ChatGPT (for Selma)
-"""
+# imagen.py — Cooksmart Nano Banana (Gemini) 3-SKU test
+# Uses google-genai (new SDK), uploads references once per SKU and reuses them.
+# Saves both RAW (exactly what the API returns) and TRANSCODED (2048 WebP) for comparison.
+# Press Ctrl+C anytime to pause; resume just by re-running.
 
 import os
+import sys
 import json
 import time
+import signal
 import smtplib
 import logging
+import argparse
+from io import BytesIO
+from typing import List, Dict
+
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from email.utils import formatdate
-from io import BytesIO
+
 from PIL import Image
 from dotenv import load_dotenv
-import google.generativeai as genai
 
+# === IMPORTANT: this is the new SDK ===
+# pip install google-genai
+from google import genai
+from google.genai import types
 
-# -------------------- CONFIG --------------------
+# -------------------- SETTINGS --------------------
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER = os.getenv("SMTP_USER")
@@ -32,36 +42,46 @@ NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")
 REFERENCE_ROOT = r"C:\Roshaan\iCloudRenamedConverted"
 OUTPUT_ROOT = os.path.join(os.getcwd(), "output_images")
 STATE_FILE = "state.json"
-LOG_FILE = "run_log.json"
 ERROR_FILE = "error_log.json"
 PROMPTS_FILE = "prompts.json"
 
 MAX_REF_IMAGES = 6
-PAUSE_ON_ERROR = True
+
+# “Nano Banana” preview model (your pick)
 MODEL = "models/gemini-2.0-flash-preview-image-generation"
 
-# Logging setup
+# Initial run defaults (can override with CLI flags)
+DEFAULT_STOP_AFTER = 3  # process only 3 SKUs for testing
+
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[logging.StreamHandler()]
 )
 
+# -------------------- SDK CLIENT --------------------
+if not GEMINI_API_KEY:
+    logging.error("GEMINI_API_KEY is missing in .env")
+    sys.exit(1)
+
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # -------------------- EMAIL --------------------
-def send_email(subject: str, html_body: str, attachment=None, filename=None):
-    """Send an alert email via Outlook SMTP."""
+def send_email(subject: str, html_body: str, attachment_bytes: bytes = None, filename: str = None):
+    if not (SMTP_HOST and SMTP_USER and SMTP_PASS and NOTIFY_EMAIL):
+        logging.warning("SMTP not fully configured; skipping email.")
+        return
     try:
         msg = MIMEMultipart()
-        msg['From'] = SMTP_USER
-        msg['To'] = NOTIFY_EMAIL
-        msg['Date'] = formatdate(localtime=True)
-        msg['Subject'] = subject
-        msg.attach(MIMEText(html_body, 'html'))
+        msg["From"] = SMTP_USER
+        msg["To"] = NOTIFY_EMAIL
+        msg["Date"] = formatdate(localtime=True)
+        msg["Subject"] = subject
+        msg.attach(MIMEText(html_body, "html"))
 
-        if attachment and filename:
-            part = MIMEApplication(attachment, Name=filename)
-            part['Content-Disposition'] = f'attachment; filename="{filename}"'
+        if attachment_bytes and filename:
+            part = MIMEApplication(attachment_bytes, Name=filename)
+            part["Content-Disposition"] = f'attachment; filename="{filename}"'
             msg.attach(part)
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -71,175 +91,256 @@ def send_email(subject: str, html_body: str, attachment=None, filename=None):
             server.sendmail(SMTP_USER, NOTIFY_EMAIL, msg.as_string())
         logging.info(f"Email sent: {subject}")
     except Exception as e:
-        logging.error(f"Email send failed: {e}")
+        logging.error(f"Email failed: {e}")
 
-
-# -------------------- UTILITIES --------------------
-def save_json(filename, data):
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-
-def load_json(filename):
-    if os.path.exists(filename):
-        with open(filename, "r", encoding="utf-8") as f:
+# -------------------- PERSISTENCE --------------------
+def load_json(path: str, default):
+    if os.path.exists(path):
+        with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
-    return {}
+    return default
 
+def save_json(path: str, obj):
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
 
-def check_background_white(image: Image.Image, tolerance=15):
-    """Check that image background is near pure white."""
-    pixels = image.convert("RGB").getdata()
-    total = len(pixels)
-    whiteish = sum(
-        1 for p in pixels if all(c > (255 - tolerance) for c in p)
-    )
-    return whiteish / total > 0.95
+def append_error(entry: Dict):
+    data = load_json(ERROR_FILE, {"errors": []})
+    data["errors"].append(entry)
+    save_json(ERROR_FILE, data)
 
-
-def transcode_image(raw_bytes: bytes, dest_path: str):
-    """Upscale and convert image to WebP for comparison."""
-    img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+# -------------------- QC HELPERS --------------------
+def is_square(img: Image.Image) -> bool:
     w, h = img.size
-    if w != 2048 or h != 2048:
+    return w == h
+
+def background_is_white(img: Image.Image, tolerance: int = 15, min_ratio: float = 0.95) -> bool:
+    # quick heuristic: count near-white pixels
+    rgb = img.convert("RGB")
+    pixels = rgb.getdata()
+    whiteish = 0
+    total = len(pixels)
+    thr = 255 - tolerance
+    for r, g, b in pixels:
+        if r >= thr and g >= thr and b >= thr:
+            whiteish += 1
+    return (whiteish / total) >= min_ratio
+
+def transcode_to_webp_2048(raw_bytes: bytes, dest_path: str):
+    img = Image.open(BytesIO(raw_bytes)).convert("RGB")
+    if img.size != (2048, 2048):
         img = img.resize((2048, 2048), Image.LANCZOS)
     img.save(dest_path, "WEBP", quality=95)
-    return dest_path
 
-
-# -------------------- GEMINI API --------------------
-genai.configure(api_key=GEMINI_API_KEY)
-
-
-def upload_reference_images(folder_path):
-    """Upload ≤6 JPGs and return list of file IDs."""
-    file_ids = []
-    files = [
-        f for f in os.listdir(folder_path)
-        if f.lower().endswith(".jpg") or f.lower().endswith(".jpeg")
-    ]
-    if len(files) > MAX_REF_IMAGES:
-        send_email(
-            "Too many reference images",
-            f"<p>Folder {folder_path} has more than {MAX_REF_IMAGES} images.</p>"
-        )
+# -------------------- GEMINI INTEGRATION --------------------
+def upload_references(folder_path: str) -> List[types.File]:
+    # Only JPG/JPEG allowed; <= 6 images
+    jpgs = [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg"))]
+    if len(jpgs) == 0:
+        raise ValueError(f"No JPG references found in {folder_path}")
+    if len(jpgs) > MAX_REF_IMAGES:
+        send_email("Too many reference images",
+                   f"<p>Folder <b>{folder_path}</b> has more than {MAX_REF_IMAGES} images.</p>")
         raise ValueError(f"Too many images in {folder_path}")
-    for fname in files:
+
+    uploaded = []
+    for fname in jpgs:
         path = os.path.join(folder_path, fname)
-        file_obj = genai.upload_file(path)
-        file_ids.append(file_obj.name)
-        time.sleep(1)  # gentle rate
-    return file_ids
+        # New SDK: client.files.upload(path=...)
+        # Reusable across requests. Returns a File object with .name like 'files/abc123'
+        fobj = client.files.upload(path=path)
+        uploaded.append(fobj)
+        time.sleep(0.3)  # gentle pacing
+    return uploaded
 
+def generate_one_image(prompt: str, refs: List[types.File]) -> bytes:
+    """
+    Uses models.generate_content with response modalites "IMAGE".
+    We pass the prompt and the uploaded files in 'contents'.
+    Response parts can include inline image data.
+    """
+    parts = [prompt]
+    # Include file refs directly; the SDK serialises them correctly for reuse.
+    parts.extend(refs)
 
-def generate_image(prompt: str, file_ids):
-    """Generate a single image using Nano Banana."""
-    response = genai.images.generate(
-        model=MODEL,
-        prompt=prompt,
-        files=file_ids
+    cfg = types.GenerateContentConfig(
+        # Ask explicitly for image output
+        response_modalities=["IMAGE"]
     )
-    if not response or not getattr(response, "generated_images", None):
-        raise RuntimeError("No image returned from API")
-    return response.generated_images[0].image_bytes
+    resp = client.models.generate_content(
+        model=MODEL,
+        contents=parts,
+        config=cfg,
+    )
 
+    # Find first image in the response
+    for cand in getattr(resp, "candidates", []):
+        for p in cand.content.parts:
+            if getattr(p, "inline_data", None) and p.inline_data.mime_type.startswith("image/"):
+                return p.inline_data.data  # raw bytes
+    raise RuntimeError("No image bytes returned from API")
 
-# -------------------- MAIN LOGIC --------------------
-def log_error(code, prompt_type, message):
-    entry = {
-        "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "product_code": code,
-        "prompt": prompt_type,
-        "error": message
-    }
-    errors = load_json(ERROR_FILE)
-    errors.setdefault("errors", []).append(entry)
-    save_json(ERROR_FILE, errors)
+# -------------------- CORE WORKFLOW --------------------
+def find_folder_for_code(code: str) -> str:
+    for name in os.listdir(REFERENCE_ROOT):
+        if name.startswith(code + " " ) or name.startswith(code + "-") or name.startswith(code + "_") or name.startswith(code):
+            # Be generous with separators; you said naming is "CODE - BARCODE"
+            return os.path.join(REFERENCE_ROOT, name)
+    return None
 
-
-def process_sku(item, state):
+def process_sku(item: Dict, pause_on_error: bool) -> bool:
     code = item["product_code"]
-    folder_name = next((f for f in os.listdir(REFERENCE_ROOT) if f.startswith(code)), None)
-    if not folder_name:
-        logging.warning(f"No folder found for {code}")
-        return
+    folder = find_folder_for_code(code)
+    if not folder or not os.path.isdir(folder):
+        logging.warning(f"Folder missing for {code} — will log and continue.")
+        append_error({
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "product_code": code,
+            "prompt": "n/a",
+            "error": "reference_folder_missing"
+        })
+        return False
 
-    ref_folder = os.path.join(REFERENCE_ROOT, folder_name)
-    out_folder = os.path.join(OUTPUT_ROOT, folder_name)
-    os.makedirs(out_folder, exist_ok=True)
-    logging.info(f"Processing {code}...")
+    out_dir = os.path.join(OUTPUT_ROOT, os.path.basename(folder))
+    os.makedirs(out_dir, exist_ok=True)
 
+    logging.info(f"Processing {code} ...")
+
+    # 1) Upload references once
     try:
-        file_ids = upload_reference_images(ref_folder)
+        refs = upload_references(folder)
     except Exception as e:
-        logging.error(f"Reference upload failed for {code}: {e}")
-        log_error(code, "upload", str(e))
-        if PAUSE_ON_ERROR:
+        logging.error(f"Upload failed for {code}: {e}")
+        append_error({
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "product_code": code,
+            "prompt": "upload",
+            "error": str(e),
+        })
+        send_email(f"Upload failed for {code}", f"<p>{e}</p>")
+        if pause_on_error:
             raise
+        return False
 
+    # 2) Four prompts
     prompts = {
         "top": item["ecomm_prompts"]["top"],
         "side": item["ecomm_prompts"]["side"],
         "front_45": item["ecomm_prompts"]["front_45"],
-        "lifestyle": item["lifestyle_prompt"]
+        "lifestyle": item["lifestyle_prompt"],
     }
 
+    # Load state to avoid double work per prompt
+    state = load_json(STATE_FILE, {})
+    done_for_code = set(state.get(code, []))
+
+    success_all = True
+
     for key, prompt in prompts.items():
+        if key in done_for_code:
+            continue
         try:
-            img_bytes = generate_image(prompt, file_ids)
+            raw_bytes = generate_one_image(prompt, refs)
 
-            raw_path = os.path.join(out_folder, f"{code}_{key}_raw.png")
+            # Save RAW exactly as returned (guess extension from bytes -> default PNG)
+            raw_path = os.path.join(out_dir, f"{code}_{key}_raw.png")
             with open(raw_path, "wb") as f:
-                f.write(img_bytes)
+                f.write(raw_bytes)
 
-            # Transcode for testing
-            transcoded_path = os.path.join(out_folder, f"{code}_{key}_transcoded.webp")
-            transcode_image(img_bytes, transcoded_path)
+            # Save TRANSCODED (for testing compare)
+            trans_path = os.path.join(out_dir, f"{code}_{key}_transcoded.webp")
+            transcode_to_webp_2048(raw_bytes, trans_path)
 
-            # QC
-            img = Image.open(BytesIO(img_bytes))
-            w, h = img.size
-            if w != h:
-                raise ValueError(f"Image not square: {w}x{h}")
-            if key != "lifestyle" and not check_background_white(img):
-                raise ValueError(f"Background not pure white for {key}")
+            # QC checks (non-fatal unless pause_on_error)
+            img = Image.open(BytesIO(raw_bytes))
+            if not is_square(img):
+                msg = f"{code} {key}: image not square ({img.size[0]}x{img.size[1]})"
+                logging.warning(msg)
+                append_error({
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "product_code": code,
+                    "prompt": key,
+                    "error": "not_square",
+                })
+                send_email(f"QC warning: {code} {key}", f"<p>{msg}</p>")
+                if pause_on_error:
+                    raise RuntimeError(msg)
 
-            logging.info(f"Saved {key} for {code}")
-            state[code] = state.get(code, []) + [key]
+            if key != "lifestyle" and not background_is_white(img):
+                msg = f"{code} {key}: background not near pure white"
+                logging.warning(msg)
+                append_error({
+                    "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "product_code": code,
+                    "prompt": key,
+                    "error": "background_not_white",
+                })
+                send_email(f"QC warning: {code} {key}", f"<p>{msg}</p>")
+                if pause_on_error:
+                    raise RuntimeError(msg)
+
+            # Mark prompt as done
+            state = load_json(STATE_FILE, {})
+            done = state.get(code, [])
+            done.append(key)
+            state[code] = sorted(set(done))
             save_json(STATE_FILE, state)
 
+            logging.info(f"Saved {key} for {code}")
+
+        except KeyboardInterrupt:
+            logging.info("Interrupted; saving state and exiting.")
+            save_json(STATE_FILE, load_json(STATE_FILE, {}))
+            raise
         except Exception as e:
-            logging.error(f"Error generating {key} for {code}: {e}")
-            log_error(code, key, str(e))
-            send_email(
-                f"Error generating {key} for {code}",
-                f"<p>{e}</p>"
-            )
-            if PAUSE_ON_ERROR:
+            success_all = False
+            logging.error(f"Error for {code} {key}: {e}")
+            append_error({
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "product_code": code,
+                "prompt": key,
+                "error": str(e),
+            })
+            send_email(f"Error: {code} {key}", f"<p>{e}</p>")
+            if pause_on_error:
                 raise
 
+    return success_all
 
+# -------------------- CLI & RUN --------------------
 def main():
-    state = load_json(STATE_FILE)
-    data = json.load(open(PROMPTS_FILE, "r", encoding="utf-8"))[:3]  # limit to 3 SKUs
-    total = len(data)
-    processed = 0
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--pause-on-error", action="store_true", help="Pause (exit) on first error.")
+    parser.add_argument("--stop-after", type=int, default=DEFAULT_STOP_AFTER, help="Max SKUs to process this run.")
+    args = parser.parse_args()
 
+    os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+    # Soft guard for Ctrl+C — ensure clean exit
+    signal.signal(signal.SIGINT, lambda sig, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    data = load_json(PROMPTS_FILE, [])
+    if not data:
+        logging.error(f"No prompts found in {PROMPTS_FILE}")
+        return
+
+    # Limit to first N SKUs for testing
+    data = data[: args.stop_after]
+
+    processed = 0
     for item in data:
-        code = item["product_code"]
-        done = state.get(code, [])
-        if len(done) == 4:
-            continue
+        code = item.get("product_code", "UNKNOWN")
         try:
-            process_sku(item, state)
-            processed += 1
+            ok = process_sku(item, pause_on_error=args.pause_on_error)
+            processed += 1 if ok else 0
+        except KeyboardInterrupt:
+            logging.info("Paused by user; exiting gracefully.")
+            break
         except Exception as e:
             logging.error(f"Stopped on {code}: {e}")
-            if PAUSE_ON_ERROR:
-                break
-            continue
+            break
 
-    logging.info(f"Completed {processed} SKUs.")
+    logging.info(f"Run complete. Successful SKUs: {processed}/{len(data)}")
 
 
 if __name__ == "__main__":
