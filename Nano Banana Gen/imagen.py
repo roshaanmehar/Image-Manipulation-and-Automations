@@ -132,12 +132,8 @@ def transcode_to_webp_2048(raw_bytes: bytes, dest_path: str):
         img = img.resize((2048, 2048), Image.LANCZOS)
     img.save(dest_path, "WEBP", quality=95)
 
-# -------------------- GEMINI INTEGRATION --------------------
 def upload_references(folder_path: str) -> List[types.File]:
-    # Only JPG/JPEG allowed; <= 6 images
     jpgs = [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg"))]
-    if len(jpgs) == 0:
-        raise ValueError(f"No JPG references found in {folder_path}")
     if len(jpgs) > MAX_REF_IMAGES:
         send_email("Too many reference images",
                    f"<p>Folder <b>{folder_path}</b> has more than {MAX_REF_IMAGES} images.</p>")
@@ -146,12 +142,11 @@ def upload_references(folder_path: str) -> List[types.File]:
     uploaded = []
     for fname in jpgs:
         path = os.path.join(folder_path, fname)
-        # New SDK: client.files.upload(path=...)
-        # Reusable across requests. Returns a File object with .name like 'files/abc123'
-        fobj = client.files.upload(path=path)
+        fobj = client.files.upload(file=path)   # <–– fixed keyword here
         uploaded.append(fobj)
-        time.sleep(0.3)  # gentle pacing
+        time.sleep(0.3)
     return uploaded
+
 
 def generate_one_image(prompt: str, refs: List[types.File]) -> bytes:
     """
