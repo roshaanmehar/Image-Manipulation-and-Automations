@@ -1,12 +1,14 @@
-# imagen.py — Cooksmart Nano Banana (Gemini) 3-SKU test (no white background check)
+# imagen.py — Cooksmart Nano Banana (Gemini) 3-SKU test (no transcoding; safe pause + resume)
 # - Uses google-genai (new SDK)
 # - Model: models/gemini-2.5-flash-image
 # - Forces 1:1 aspect ratio
-# - Upload references once per SKU (reuse across 4 prompts)
-# - Saves RAW (exact API output with correct extension) + TRANSCODED (2048 WebP)
+# - Upload references once per SKU (reused across 4 prompts)
+# - Saves RAW (exact API output with correct extension), no transcoding
 # - QC: only checks for square images (white background check removed)
-# - SMTP alerts on errors
+# - SMTP alerts on errors/warnings
 # - Ctrl+C to pause safely; re-run to resume
+#   * Resume logic: state tracks COMPLETED SKUs only.
+#   * If interrupted mid-SKU, that SKU is NOT marked complete and will be fully re-run.
 
 import os
 import sys
@@ -45,7 +47,7 @@ NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL")
 
 REFERENCE_ROOT = r"C:\Roshaan\iCloudRenamedConverted"
 OUTPUT_ROOT = os.path.join(os.getcwd(), "output_images")
-STATE_FILE = "state.json"
+STATE_FILE = "state.json"          # Tracks COMPLETED SKUs only
 ERROR_FILE = "error_log.json"
 PROMPTS_FILE = "prompts.json"
 
@@ -117,12 +119,6 @@ def is_square(img: Image.Image) -> bool:
     w, h = img.size
     return w == h
 
-def transcode_to_webp_2048(raw_bytes: bytes, dest_path: str):
-    img = Image.open(BytesIO(raw_bytes)).convert("RGB")
-    if img.size != (2048, 2048):
-        img = img.resize((2048, 2048), Image.LANCZOS)
-    img.save(dest_path, "WEBP", quality=95)
-
 def mime_to_ext(mime: str) -> str:
     if not mime:
         return ".png"
@@ -171,7 +167,7 @@ def generate_one_image(prompt: str, refs: List[types.File]) -> Tuple[bytes, str]
     # Safely iterate only valid candidates
     for cand in getattr(resp, "candidates", []):
         if not getattr(cand, "content", None):
-            continue  # skip empty or metadata candidates
+            continue
         for p in getattr(cand.content, "parts", []):
             if getattr(p, "inline_data", None) and getattr(p.inline_data, "data", None):
                 mime = getattr(p.inline_data, "mime_type", "image/png")
@@ -179,8 +175,19 @@ def generate_one_image(prompt: str, refs: List[types.File]) -> Tuple[bytes, str]
 
     raise RuntimeError("No image bytes returned from API")
 
+# -------------------- STATE (COMPLETED SKUs ONLY) --------------------
+def load_completed_skus() -> set:
+    state = load_json(STATE_FILE, {"completed_skus": []})
+    return set(state.get("completed_skus", []))
 
-# -------------------- MAIN WORKFLOW --------------------
+def mark_sku_complete(product_code: str):
+    state = load_json(STATE_FILE, {"completed_skus": []})
+    comps = set(state.get("completed_skus", []))
+    comps.add(product_code)
+    state["completed_skus"] = sorted(comps)
+    save_json(STATE_FILE, state)
+
+# -------------------- UTILS --------------------
 def find_folder_for_code(code: str) -> str:
     for name in os.listdir(REFERENCE_ROOT):
         if name.startswith(code):
@@ -189,7 +196,12 @@ def find_folder_for_code(code: str) -> str:
                 return full
     return None
 
+# -------------------- PER-SKU WORKFLOW --------------------
 def process_sku(item: Dict, pause_on_error: bool) -> bool:
+    """
+    Returns True only if the SKU fully succeeds (all prompts done).
+    Any exception/KeyboardInterrupt means the SKU is not marked complete.
+    """
     code = item["product_code"]
     folder = find_folder_for_code(code)
     if not folder:
@@ -221,6 +233,7 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
             raise
         return False
 
+    # Prompts to generate for this SKU
     prompts = {
         "top": item["ecomm_prompts"]["top"],
         "side": item["ecomm_prompts"]["side"],
@@ -228,14 +241,9 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
         "lifestyle": item["lifestyle_prompt"],
     }
 
-    state = load_json(STATE_FILE, {})
-    done_for_code = set(state.get(code, []))
-    success_all = True
-
-    for key, prompt in prompts.items():
-        if key in done_for_code:
-            continue
-        try:
+    try:
+        for key, prompt in prompts.items():
+            # Generate and save RAW image
             raw_bytes, mime = generate_one_image(prompt, refs)
 
             ext = mime_to_ext(mime)
@@ -243,9 +251,7 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
             with open(raw_path, "wb") as f:
                 f.write(raw_bytes)
 
-            trans_path = os.path.join(out_dir, f"{code}_{key}_transcoded.webp")
-            transcode_to_webp_2048(raw_bytes, trans_path)
-
+            # QC: must be square (1:1)
             img = Image.open(BytesIO(raw_bytes))
             if not is_square(img):
                 msg = f"{code} {key}: image not square ({img.size[0]}x{img.size[1]})"
@@ -260,32 +266,30 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
                 if pause_on_error:
                     raise RuntimeError(msg)
 
-            state = load_json(STATE_FILE, {})
-            done = state.get(code, [])
-            done.append(key)
-            state[code] = sorted(set(done))
-            save_json(STATE_FILE, state)
-
             logging.info(f"Saved {key} for {code}")
 
-        except KeyboardInterrupt:
-            logging.info("Interrupted; saving state and exiting.")
-            save_json(STATE_FILE, load_json(STATE_FILE, {}))
-            raise
-        except Exception as e:
-            success_all = False
-            logging.error(f"Error for {code} {key}: {e}")
-            append_error({
-                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
-                "product_code": code,
-                "prompt": key,
-                "error": str(e),
-            })
-            send_email(f"Error: {code} {key}", f"<p>{e}</p>")
-            if pause_on_error:
-                raise
+        # If we reached here, all prompts finished for this SKU
+        mark_sku_complete(code)
+        logging.info(f"SKU complete: {code}")
+        return True
 
-    return success_all
+    except KeyboardInterrupt:
+        logging.info("Interrupted mid-SKU; not marking as complete. You can rerun to restart this SKU.")
+        # Let the interrupt bubble up so main can stop gracefully
+        raise
+
+    except Exception as e:
+        logging.error(f"Error for {code}: {e}")
+        append_error({
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "product_code": code,
+            "prompt": "sku_run",
+            "error": str(e),
+        })
+        send_email(f"Error: {code}", f"<p>{e}</p>")
+        if pause_on_error:
+            raise
+        return False
 
 # -------------------- CLI --------------------
 def main():
@@ -295,29 +299,44 @@ def main():
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
+
+    # Convert Ctrl+C into KeyboardInterrupt immediately
     signal.signal(signal.SIGINT, lambda sig, frame: (_ for _ in ()).throw(KeyboardInterrupt()))
 
+    # Load prompts
     data = load_json(PROMPTS_FILE, [])
     if not data:
         logging.error(f"No prompts found in {PROMPTS_FILE}")
         return
-    data = data[: args.stop_after]
 
-    processed = 0
-    for item in data:
+    # Resume: skip SKUs already completed in previous runs
+    completed = load_completed_skus()
+    pending_items = [item for item in data if item.get("product_code") not in completed]
+
+    if not pending_items:
+        logging.info("Nothing to do. All SKUs in prompts.json are marked complete.")
+        return
+
+    # Respect stop-after limit
+    pending_items = pending_items[: args.stop_after]
+
+    processed_success = 0
+    total = len(pending_items)
+
+    for item in pending_items:
         code = item.get("product_code", "UNKNOWN")
         try:
             ok = process_sku(item, pause_on_error=args.pause_on_error)
-            processed += 1 if ok else 0
+            if ok:
+                processed_success += 1
         except KeyboardInterrupt:
-            logging.info("Paused by user; exiting gracefully.")
+            logging.info("Paused by user; exiting gracefully. Progress saved for completed SKUs only.")
             break
         except Exception as e:
             logging.error(f"Stopped on {code}: {e}")
             break
 
-    logging.info(f"Run complete. Successful SKUs: {processed}/{len(data)}")
-
+    logging.info(f"Run complete. Successful SKUs this run: {processed_success}/{total}")
 
 if __name__ == "__main__":
     main()
