@@ -1,14 +1,15 @@
-# imagen.py — Cooksmart Nano Banana (Gemini) 3-SKU test (no transcoding; safe pause + resume)
+# imagen.py — Cooksmart Nano Banana (Gemini) run-all + robust retries + safe pause/resume
 # - Uses google-genai (new SDK)
 # - Model: models/gemini-2.5-flash-image
 # - Forces 1:1 aspect ratio
 # - Upload references once per SKU (reused across 4 prompts)
-# - Saves RAW (exact API output with correct extension), no transcoding
-# - QC: only checks for square images (white background check removed)
+# - Saves RAW only (exact API output with correct extension) — no transcoding
+# - QC: checks for square images only
 # - SMTP alerts on errors/warnings
 # - Ctrl+C to pause safely; re-run to resume
 #   * Resume logic: state tracks COMPLETED SKUs only.
 #   * If interrupted mid-SKU, that SKU is NOT marked complete and will be fully re-run.
+# - Retries with exponential backoff + jitter for uploads and image generation.
 
 import os
 import sys
@@ -18,8 +19,9 @@ import signal
 import smtplib
 import logging
 import argparse
+import random
 from io import BytesIO
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Callable, Any
 
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -52,11 +54,18 @@ ERROR_FILE = "error_log.json"
 PROMPTS_FILE = "prompts.json"
 
 MAX_REF_IMAGES = 6
-DEFAULT_STOP_AFTER = 3  # process only 3 SKUs for testing
+
+# Default: process ALL SKUs (0 = no limit). Override with --stop-after if you want a cap.
+DEFAULT_STOP_AFTER = 0
 
 MODEL = "models/gemini-2.5-flash-image"
 RESP_MODALITIES = ["IMAGE"]
 ASPECT_RATIO = "1:1"
+
+# Retry policy
+RETRY_MAX_ATTEMPTS = int(os.getenv("RETRY_MAX_ATTEMPTS", "4"))
+RETRY_BASE_DELAY_S = float(os.getenv("RETRY_BASE_DELAY_S", "2.0"))  # initial backoff
+RETRY_MAX_DELAY_S = float(os.getenv("RETRY_MAX_DELAY_S", "20.0"))   # cap backoff
 
 # Logging
 logging.basicConfig(
@@ -114,6 +123,36 @@ def append_error(entry: Dict):
     data["errors"].append(entry)
     save_json(ERROR_FILE, data)
 
+# -------------------- RETRY HELPER --------------------
+def retry_call(func: Callable[..., Any], *args, **kwargs):
+    """
+    Generic retry with exponential backoff and jitter.
+    Raises last exception if all attempts fail.
+    """
+    attempts = RETRY_MAX_ATTEMPTS
+    delay = RETRY_BASE_DELAY_S
+    last_exc = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            return func(*args, **kwargs)
+        except KeyboardInterrupt:
+            # Always respect manual pause immediately
+            raise
+        except Exception as e:
+            last_exc = e
+            if attempt == attempts:
+                break
+            # Jitter: 0.7–1.3x
+            jitter = random.uniform(0.7, 1.3)
+            sleep_for = min(delay * jitter, RETRY_MAX_DELAY_S)
+            logging.warning(f"{func.__name__} failed (attempt {attempt}/{attempts}): {e}. Retrying in {sleep_for:.1f}s ...")
+            time.sleep(sleep_for)
+            delay = min(delay * 2, RETRY_MAX_DELAY_S)
+
+    # All attempts exhausted
+    raise last_exc
+
 # -------------------- QC HELPERS --------------------
 def is_square(img: Image.Image) -> bool:
     w, h = img.size
@@ -132,6 +171,9 @@ def mime_to_ext(mime: str) -> str:
     return ".png"
 
 # -------------------- GEMINI INTEGRATION --------------------
+def _upload_single_file(path: str):
+    return client.files.upload(file=path)
+
 def upload_references(folder_path: str) -> List[types.File]:
     jpgs = [f for f in os.listdir(folder_path) if f.lower().endswith((".jpg", ".jpeg"))]
     if len(jpgs) == 0:
@@ -144,10 +186,18 @@ def upload_references(folder_path: str) -> List[types.File]:
     uploaded = []
     for fname in jpgs:
         path = os.path.join(folder_path, fname)
-        fobj = client.files.upload(file=path)
+        # Retry each upload individually
+        fobj = retry_call(_upload_single_file, path)
         uploaded.append(fobj)
-        time.sleep(0.3)
+        time.sleep(0.2)
     return uploaded
+
+def _generate(model: str, parts, cfg):
+    return client.models.generate_content(
+        model=model,
+        contents=parts,
+        config=cfg,
+    )
 
 def generate_one_image(prompt: str, refs: List[types.File]) -> Tuple[bytes, str]:
     parts = [prompt]
@@ -158,11 +208,8 @@ def generate_one_image(prompt: str, refs: List[types.File]) -> Tuple[bytes, str]
         image_config=types.ImageConfig(aspect_ratio=ASPECT_RATIO)
     )
 
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=parts,
-        config=cfg,
-    )
+    # Retry the model call
+    resp = retry_call(_generate, MODEL, parts, cfg)
 
     # Safely iterate only valid candidates
     for cand in getattr(resp, "candidates", []):
@@ -173,6 +220,7 @@ def generate_one_image(prompt: str, refs: List[types.File]) -> Tuple[bytes, str]
                 mime = getattr(p.inline_data, "mime_type", "image/png")
                 return p.inline_data.data, mime
 
+    # If we got here, treat as a retryable failure from our caller
     raise RuntimeError("No image bytes returned from API")
 
 # -------------------- STATE (COMPLETED SKUs ONLY) --------------------
@@ -218,6 +266,7 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
     os.makedirs(out_dir, exist_ok=True)
     logging.info(f"Processing {code} ...")
 
+    # Upload references (with retries)
     try:
         refs = upload_references(folder)
     except Exception as e:
@@ -243,8 +292,13 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
 
     try:
         for key, prompt in prompts.items():
-            # Generate and save RAW image
-            raw_bytes, mime = generate_one_image(prompt, refs)
+            # Generate and save RAW image (generation has retries inside generate_one_image)
+            try:
+                raw_bytes, mime = generate_one_image(prompt, refs)
+            except Exception as gen_err:
+                # One more outer retry loop on a per-prompt basis (covers parsing failures etc.)
+                logging.warning(f"Prompt '{key}' for {code} failed once more: {gen_err}. Retrying prompt flow ...")
+                raw_bytes, mime = generate_one_image(prompt, refs)
 
             ext = mime_to_ext(mime)
             raw_path = os.path.join(out_dir, f"{code}_{key}_raw{ext}")
@@ -275,7 +329,6 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
 
     except KeyboardInterrupt:
         logging.info("Interrupted mid-SKU; not marking as complete. You can rerun to restart this SKU.")
-        # Let the interrupt bubble up so main can stop gracefully
         raise
 
     except Exception as e:
@@ -295,7 +348,8 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--pause-on-error", action="store_true", help="Pause (exit) on first error.")
-    parser.add_argument("--stop-after", type=int, default=DEFAULT_STOP_AFTER, help="Max SKUs to process this run.")
+    parser.add_argument("--stop-after", type=int, default=DEFAULT_STOP_AFTER,
+                        help="Max SKUs to process this run (0 means ALL).")
     args = parser.parse_args()
 
     os.makedirs(OUTPUT_ROOT, exist_ok=True)
@@ -317,8 +371,9 @@ def main():
         logging.info("Nothing to do. All SKUs in prompts.json are marked complete.")
         return
 
-    # Respect stop-after limit
-    pending_items = pending_items[: args.stop_after]
+    # Respect stop-after limit (0 => all)
+    if args.stop_after and args.stop_after > 0:
+        pending_items = pending_items[: args.stop_after]
 
     processed_success = 0
     total = len(pending_items)
