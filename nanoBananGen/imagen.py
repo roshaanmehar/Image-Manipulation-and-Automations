@@ -6,6 +6,7 @@
 # - Saves RAW only (exact API output with correct extension) — no transcoding
 # - QC: checks for square images only
 # - SMTP + ntfy alerts on warnings/errors (errors at highest priority)
+#   * Includes header sanitisation for ntfy (ASCII-only headers)
 # - Ctrl+C to pause safely; re-run to resume
 #   * Resume logic: state tracks COMPLETED SKUs only.
 #   * If interrupted mid-SKU, that SKU is NOT marked complete and will be fully re-run.
@@ -45,6 +46,7 @@ import logging
 import argparse
 import random
 import traceback
+import unicodedata
 from io import BytesIO
 from typing import List, Dict, Tuple, Callable, Any
 
@@ -235,26 +237,55 @@ def send_email(subject: str, html_body: str, attachments: list[tuple[str, bytes]
     except Exception as e:
         logger.error(f"Email failed: {e}")
 
+def _sanitize_http_header_value(s: str) -> str:
+    """
+    HTTP/1.1 headers must be ISO-8859-1. Replace common Unicode punctuation,
+    then normalise to ASCII to avoid codec errors in requests.
+    """
+    if s is None:
+        return ""
+    replacements = {
+        "\u2014": "-",   # em dash —
+        "\u2013": "-",   # en dash –
+        "\u2212": "-",   # minus −
+        "\u00A0": " ",   # non-breaking space
+        "\u2018": "'", "\u2019": "'",  # curly single quotes
+        "\u201C": '"', "\u201D": '"',  # curly double quotes
+    }
+    for bad, good in replacements.items():
+        s = s.replace(bad, good)
+    s = unicodedata.normalize("NFKD", s)
+    s = s.encode("ascii", "ignore").decode("ascii", "strict")
+    return s.strip()
+
 def send_ntfy(title: str, message: str, priority: int = 5, tags: list[str] | None = None):
     if not NTFY_URL:
         logger.error("ntfy is not configured (NTFY_URL or NTFY_TOPIC missing). Cannot send notification.")
         return
-    headers = {
-        "Title": title,
-        "Priority": str(priority),
-    }
-    if tags:
-        headers["Tags"] = ",".join(tags)
+
+    # Sanitise header values to ASCII-safe strings
+    safe_title = _sanitize_http_header_value(title)
+    safe_priority = _sanitize_http_header_value(str(priority))
+    safe_tags = ",".join(tags) if tags else None
+    safe_tags = _sanitize_http_header_value(safe_tags) if safe_tags else None
+
+    headers = {"Title": safe_title, "Priority": safe_priority}
+    if safe_tags:
+        headers["Tags"] = safe_tags
+
     auth = (NTFY_USERNAME, NTFY_PASSWORD) if (NTFY_USERNAME and NTFY_PASSWORD) else None
 
     try:
-        logger.debug(f"Posting to ntfy: url='{NTFY_URL}', headers={{{'Title':headers.get('Title'),'Priority':headers.get('Priority'),'Tags':headers.get('Tags')}}}")
+        hdr_preview = {"Title": headers.get("Title"), "Priority": headers.get("Priority"), "Tags": headers.get("Tags")}
+        logger.debug("Posting to ntfy: url=%s, headers=%s", NTFY_URL, hdr_preview)
+
+        # Body can be UTF-8; ntfy handles it
         r = requests.post(NTFY_URL, data=message.encode("utf-8"), headers=headers, auth=auth, timeout=15)
-        logger.debug(f"ntfy response: status={r.status_code}, body_snippet='{r.text[:300]}'")
+        logger.debug("ntfy response: status=%s, body_snippet='%s'", r.status_code, r.text[:300])
         if r.status_code // 100 != 2:
             logger.warning(f"ntfy responded with status {r.status_code}: {r.text[:500]}")
         else:
-            logger.info(f"ntfy sent: {title}")
+            logger.info(f"ntfy sent: {safe_title}")
     except Exception as e:
         logger.error(f"ntfy failed: {e}")
 
@@ -551,6 +582,22 @@ def process_sku(item: Dict, pause_on_error: bool) -> bool:
             try:
                 raw_bytes, mime = generate_one_image(prompt, refs)
             except Exception as gen_err:
+                # Notify immediately on first failure (including "No image bytes returned from API"),
+                # then retry once as before.
+                err_msg = str(gen_err)
+                err_code = "gen_first_attempt_failed"
+                if isinstance(gen_err, RuntimeError) and "No image bytes returned from API" in err_msg:
+                    err_code = "no_image_bytes"
+
+                record_and_notify_error(
+                    product_code=code,
+                    prompt_key=key,
+                    error_code=err_code,
+                    err=gen_err,
+                    extra={"will_retry": True, "model": MODEL, "aspect_ratio": ASPECT_RATIO},
+                    pause_on_error=False,  # do not pause here; we retry once
+                )
+
                 logger.warning(f"[{code}] '{key}' generation failed once: {gen_err}. Retrying full prompt flow …")
                 raw_bytes, mime = generate_one_image(prompt, refs)
 

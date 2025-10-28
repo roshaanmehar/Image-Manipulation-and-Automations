@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="x-ua-compatible" content="IE=edge">
+<title>Curate & Cull (single Explorer window)</title>
+<HTA:APPLICATION
+  ID="curate"
+  APPLICATIONNAME="CurateAndCull"
+  BORDER="thin"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+  SYSMENU="yes"
+  SINGLEINSTANCE="no"
+  SCROLL="no"
+  WINDOWSTATE="normal"
+/>
+<style>
+  body { font-family: Segoe UI, Tahoma, Arial, sans-serif; margin: 14px; }
+  fieldset { margin: 0 0 10px 0; }
+  button { margin-right: 8px; padding: 6px 10px; }
+  #status { margin-top: 6px; color: #333; }
+  #warning { color: #b00020; font-weight: 600; }
+  .muted { color: #666; }
+  #pathInput { width: 420px; }
+</style>
+
+<script language="VBScript">
+Option Explicit
+
+Dim fso, sh, wsh
+Dim parentPath, subFolders, subIdx, totalSubs
+Dim expl ' Explorer window reused
+Dim currentFolderPath
+Dim processedCount
+
+'-------------------- lifecycle
+Sub Window_OnLoad()
+  Set fso = CreateObject("Scripting.FileSystemObject")
+  Set sh  = CreateObject("Shell.Application")
+  Set wsh = CreateObject("WScript.Shell")
+  document.title = "Curate & Cull (single Explorer window)"
+  ResetState
+  statusSpan.InnerHTML = "Choose a parent folder, then press Start."
+End Sub
+
+Sub ResetState()
+  parentPath = ""
+  ReDim subFolders(0)
+  subIdx = -1
+  totalSubs = 0
+  processedCount = 0
+  progressSpan.InnerHTML = ""
+  currentFolderPath = ""
+End Sub
+
+'-------------------- event wiring via IDs (no inline JS/VB)
+Sub browseBtn_OnClick()
+  Dim folder
+  On Error Resume Next
+  Set folder = sh.BrowseForFolder(0, "Select the PARENT folder (only immediate subfolders are processed):", 0)
+  On Error Goto 0
+  If Not folder Is Nothing Then
+    parentPath = folder.Self.Path
+    pathInput.Value = parentPath
+  End If
+End Sub
+
+Sub startBtn_OnClick()
+  If parentPath = "" Then parentPath = Trim(pathInput.Value)
+  If parentPath = "" Then
+    MsgBox "Please set a parent folder.", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+  If Not fso.FolderExists(parentPath) Then
+    MsgBox "That folder doesn't exist.", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  BuildSubfolderList parentPath
+  If totalSubs = 0 Then
+    MsgBox "No subfolders were found under:" & vbCrLf & parentPath, vbInformation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  processedCount = 0
+  progressSpan.InnerHTML = "0 / " & totalSubs
+  NextFolder
+End Sub
+
+Sub keepBtn_OnClick()
+  Dim doc, sel, keepCount
+  If expl Is Nothing Then
+    MsgBox "Explorer window isn't open yet.", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  On Error Resume Next
+  Set doc = expl.Document
+  On Error Goto 0
+  If doc Is Nothing Then
+    MsgBox "Explorer hasn't loaded that folder yet. Click Redo, then try again.", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  Set sel = doc.SelectedItems
+  If sel Is Nothing Then
+    MsgBox "No items selected.", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  keepCount = sel.Count
+  If keepCount < 1 Or keepCount > 6 Then
+    MsgBox "Please select between 1 and 6 files to keep (you've selected " & keepCount & ").", vbExclamation, "Curate & Cull"
+    Exit Sub
+  End If
+
+  ' Map of files to keep
+  Dim dictKeep, i
+  Set dictKeep = CreateObject("Scripting.Dictionary")
+  dictKeep.CompareMode = 1 ' TextCompare
+
+  For i = 0 To keepCount - 1
+    Dim p
+    p = sel.Item(i).Path
+    If Not fso.FolderExists(p) Then dictKeep(p) = True ' ignore folders
+  Next
+
+  ' Delete the other files (to Recycle Bin)
+  Dim folderNS, file, deletedCount
+  deletedCount = 0
+  Set folderNS = sh.Namespace(currentFolderPath)
+
+  For Each file In fso.GetFolder(currentFolderPath).Files
+    If Not dictKeep.Exists(file.Path) Then
+      Dim toDel
+      Set toDel = folderNS.ParseName(fso.GetFileName(file.Path))
+      If Not toDel Is Nothing Then
+        On Error Resume Next
+        toDel.InvokeVerb "delete" ' honours Recycle Bin
+        If Err.Number = 0 Then deletedCount = deletedCount + 1
+        Err.Clear
+        On Error Goto 0
+      End If
+    End If
+  Next
+
+  processedCount = processedCount + 1
+  progressSpan.InnerHTML = CStr(processedCount) & " / " & totalSubs
+  statusSpan.InnerHTML = "Kept " & dictKeep.Count & " item(s); deleted " & deletedCount & " other file(s) in <b>" & HtmlEncode(currentFolderPath) & "</b>."
+  NextFolder
+End Sub
+
+Sub skipBtn_OnClick()
+  If currentFolderPath <> "" Then
+    statusSpan.InnerHTML = "Skipped: <b>" & HtmlEncode(currentFolderPath) & "</b>"
+  End If
+  NextFolder
+End Sub
+
+Sub redoBtn_OnClick()
+  If currentFolderPath = "" Then Exit Sub
+  If expl Is Nothing Then
+    Set expl = sh.Explore(currentFolderPath)
+  Else
+    expl.Navigate2 currentFolderPath
+  End If
+  statusSpan.InnerHTML = "Reopened: <b>" & HtmlEncode(currentFolderPath) & "</b>."
+End Sub
+
+Sub quitBtn_OnClick()
+  On Error Resume Next
+  If Not expl Is Nothing Then expl.Quit
+  On Error Goto 0
+  Window.Close
+End Sub
+
+'-------------------- helpers
+Sub BuildSubfolderList(basePath)
+  Dim folder, sf, arr(), i
+  Set folder = fso.GetFolder(basePath)
+  i = 0
+  ReDim arr(0)
+  For Each sf In folder.SubFolders
+    If i > 0 Then ReDim Preserve arr(i)
+    arr(i) = sf.Path
+    i = i + 1
+  Next
+  subFolders = arr
+  totalSubs = i
+  subIdx = -1
+End Sub
+
+Sub NextFolder()
+  subIdx = subIdx + 1
+  If subIdx >= totalSubs Then
+    statusSpan.InnerHTML = "<b>All done.</b> You may close this window."
+    Exit Sub
+  End If
+
+  currentFolderPath = subFolders(subIdx)
+  statusSpan.InnerHTML = "Open folder: <b>" & HtmlEncode(currentFolderPath) & "</b><br>" & _
+    "Select 1–6 files in the Explorer window, then click <b>Keep Selected &amp; Delete Others</b>."
+
+  If expl Is Nothing Then
+    Set expl = sh.Explore(currentFolderPath)
+  Else
+    On Error Resume Next
+    expl.Navigate2 currentFolderPath
+    On Error Goto 0
+  End If
+End Sub
+
+Function HtmlEncode(s)
+  s = Replace(s, "&", "&amp;")
+  s = Replace(s, "<", "&lt;")
+  s = Replace(s, ">", "&gt;")
+  HtmlEncode = s
+End Function
+</script>
+</head>
+
+<body>
+  <fieldset>
+    <legend>1) Choose parent folder</legend>
+    <input type="text" id="pathInput" placeholder="e.g. D:\Photos\2024" />
+    <button id="browseBtn">Browse…</button>
+    <button id="startBtn"><b>Start</b></button>
+    <span class="muted" id="progressSpan" style="margin-left:12px;"></span>
+  </fieldset>
+
+  <fieldset>
+    <legend>2) For each subfolder</legend>
+    <button id="keepBtn"><b>Keep Selected &amp; Delete Others</b></button>
+    <button id="skipBtn">Skip</button>
+    <button id="redoBtn">Redo</button>
+    <button id="quitBtn">Quit</button>
+    <div id="status" style="margin-top:8px;">
+      <span id="statusSpan"></span>
+      <div id="warning" class="muted">Deletion goes to the Recycle Bin via Explorer. Review the bin before emptying.</div>
+    </div>
+  </fieldset>
+
+  <div class="muted">
+    Tips:
+    <ul>
+      <li>The single Explorer window re-navigates for each subfolder.</li>
+      <li>Selections must be files (folders are ignored).</li>
+      <li>“Redo” simply reopens the current subfolder; it doesn’t undo deletions.</li>
+    </ul>
+  </div>
+</body>
+</html>
