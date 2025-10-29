@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta http-equiv="x-ua-compatible" content="ie=9">
+<title>Folder Image Processor</title>
+<HTA:APPLICATION
+     ID="objFolderProcessor"
+     APPLICATIONNAME="FolderProcessor"
+     SCROLL="yes"
+     SINGLEINSTANCE="yes"
+     WINDOWSTATE="normal"
+>
+
+<style>
+    body { font-family: Segoe UI, calibri, sans-serif; background-color: #f0f0f0; margin: 15px; }
+    h2 { color: #003366; }
+    #mainContainer { background-color: #ffffff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 5px rgba(0,0,0,0.1); }
+    #currentFolderDisplay { font-size: 1.2em; font-weight: bold; color: #333; border-bottom: 2px solid #005a9e; padding-bottom: 10px; margin-bottom: 15px; }
+    #fileList { max-height: 300px; overflow-y: auto; border: 1px solid #ccc; padding: 10px; background-color: #fafafa; margin-bottom: 15px; }
+    .fileItem { display: block; margin-bottom: 8px; }
+    .button {
+        padding: 10px 15px;
+        font-size: 1em;
+        color: white;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        margin-right: 10px;
+    }
+    #btnMove { background-color: #28a745; }
+    #btnMove:hover { background-color: #218838; }
+    #btnSkip { background-color: #ffc107; color: black; }
+    #btnSkip:hover { background-color: #e0a800; }
+    #btnRedo { background-color: #dc3545; }
+    #btnRedo:hover { background-color: #c82333; }
+    #btnRedo:disabled { background-color: #cccccc; cursor: not-allowed; }
+    #status { margin-top: 20px; font-style: italic; color: #555; }
+</style>
+
+<script language="VBScript">
+
+' =================================================================
+'               GLOBAL VARIABLES
+' =================================================================
+Dim FSO, Shell
+Dim rootFolderPath, movedFolderPath
+Dim subFolders
+Dim currentFolderIndex
+Dim lastMove ' A dictionary object to store info for the redo action
+
+' =================================================================
+'               INITIALIZATION
+' =================================================================
+Sub Window_OnLoad
+    Set FSO = CreateObject("Scripting.FileSystemObject")
+    Set Shell = CreateObject("WScript.Shell")
+    Set lastMove = CreateObject("Scripting.Dictionary")
+
+    ' Get the path of the HTA file itself, which serves as the root
+    rootFolderPath = Replace(document.location.pathname, "%20", " ")
+    rootFolderPath = FSO.GetParentFolderName(rootFolderPath)
+
+    Set subFolders = CreateObject("System.Collections.ArrayList")
+    Dim rootFolderObj, folder
+    Set rootFolderObj = FSO.GetFolder(rootFolderPath)
+
+    ' Collect all subfolders, ignoring the 'moved' folder
+    For Each folder In rootFolderObj.SubFolders
+        If LCase(folder.Name) <> "moved" Then
+            subFolders.Add folder.Path
+        End If
+    Next
+
+    If subFolders.Count = 0 Then
+        document.getElementById("status").innerHTML = "No subfolders found in the root directory to process."
+        Exit Sub
+    End If
+
+    ' Path for the main "moved" directory
+    movedFolderPath = FSO.BuildPath(rootFolderPath, "moved")
+
+    currentFolderIndex = 0
+    document.getElementById("btnRedo").disabled = True
+    ProcessNextFolder
+End Sub
+
+' =================================================================
+'               CORE LOGIC
+' =================================================================
+Sub ProcessNextFolder
+    ' Clear previous file list and update status
+    document.getElementById("fileList").innerHTML = ""
+    document.getElementById("status").innerHTML = ""
+
+    If currentFolderIndex >= subFolders.Count Then
+        document.getElementById("currentFolderDisplay").innerHTML = "Processing Complete!"
+        document.getElementById("status").innerHTML = "All folders have been processed."
+        document.getElementById("controls").style.display = "none" ' Hide buttons
+        Exit Sub
+    End If
+
+    Dim currentPath, currentName
+    currentPath = subFolders(currentFolderIndex)
+    currentName = FSO.GetFileName(currentPath)
+    document.getElementById("currentFolderDisplay").innerHTML = "Processing: " & currentName
+
+    Dim folderObj, file, fileExt
+    Set folderObj = FSO.GetFolder(currentPath)
+    Dim hasImages, html
+    hasImages = False
+    html = ""
+
+    ' Find and list all image files in the current subfolder
+    For Each file In folderObj.Files
+        fileExt = LCase(FSO.GetExtensionName(file.Name))
+        If fileExt = "jpg" Or fileExt = "jpeg" Or fileExt = "png" Or fileExt = "gif" Or fileExt = "bmp" Then
+            hasImages = True
+            html = html & "<div class='fileItem'><input type='checkbox' name='fileCheckbox' value='" & file.Path & "'> " & file.Name & "</div>"
+        End If
+    Next
+
+    If Not hasImages Then
+        html = "<i>No image files found in this folder.</i>"
+    End If
+
+    document.getElementById("fileList").innerHTML = html
+End Sub
+
+' =================================================================
+'               BUTTON ACTIONS
+' =================================================================
+Sub MoveSelectedFiles
+    Dim checkboxes, selectedFiles, count
+    Set checkboxes = document.getElementsByName("fileCheckbox")
+    Set selectedFiles = CreateObject("System.Collections.ArrayList")
+    count = 0
+
+    Dim cb
+    For Each cb In checkboxes
+        If cb.checked Then
+            selectedFiles.Add cb.value
+            count = count + 1
+        End If
+    Next
+
+    ' Validate selection count
+    If count = 0 Then
+        MsgBox "Please select at least one image file to move.", 48, "No Selection"
+        Exit Sub
+    End If
+    If count > 4 Then
+        MsgBox "You can only select a maximum of 4 image files at a time.", 48, "Selection Limit Exceeded"
+        Exit Sub
+    End If
+
+    ' --- Prepare for the move ---
+    ' Clear previous redo info and store new info
+    lastMove.RemoveAll
+    Set lastMove("files") = CreateObject("System.Collections.ArrayList")
+
+    Dim sourceFolderPath, sourceFolderName
+    sourceFolderPath = subFolders(currentFolderIndex)
+    sourceFolderName = FSO.GetFileName(sourceFolderPath)
+
+    ' Create 'moved' and subfolder if they don't exist
+    If Not FSO.FolderExists(movedFolderPath) Then
+        FSO.CreateFolder movedFolderPath
+    End If
+    Dim targetSubFolderPath
+    targetSubFolderPath = FSO.BuildPath(movedFolderPath, sourceFolderName)
+    If Not FSO.FolderExists(targetSubFolderPath) Then
+        FSO.CreateFolder targetSubFolderPath
+    End If
+
+    ' Store details for the redo action
+    lastMove.Add "sourceDir", sourceFolderPath
+    lastMove.Add "destDir", targetSubFolderPath
+
+    ' --- Execute the move ---
+    Dim filePath, fileName
+    For Each filePath In selectedFiles
+        fileName = FSO.GetFileName(filePath)
+        lastMove("files").Add fileName ' Store just the filename for redo
+        FSO.MoveFile filePath, targetSubFolderPath & "\"
+    Next
+
+    document.getElementById("status").innerHTML = "Moved " & count & " file(s) from '" & sourceFolderName & "'."
+    document.getElementById("btnRedo").disabled = False ' Enable the redo button
+
+    ' --- Move to next folder ---
+    currentFolderIndex = currentFolderIndex + 1
+    ProcessNextFolder
+End Sub
+
+Sub SkipFolder
+    Dim sourceFolderName
+    sourceFolderName = FSO.GetFileName(subFolders(currentFolderIndex))
+    document.getElementById("status").innerHTML = "Skipped folder '" & sourceFolderName & "'."
+    document.getElementById("btnRedo").disabled = True ' Cannot redo a skip
+    lastMove.RemoveAll ' Clear any previous move data
+
+    currentFolderIndex = currentFolderIndex + 1
+    ProcessNextFolder
+End Sub
+
+Sub RedoLastMove
+    If lastMove.Count = 0 Then
+        MsgBox "There is no action to redo.", 64, "Redo Action"
+        Exit Sub
+    End If
+
+    Dim sourceDir, destDir, filesToMove, count
+    sourceDir = lastMove("sourceDir")
+    destDir = lastMove("destDir")
+    Set filesToMove = lastMove("files")
+    count = filesToMove.Count
+
+    ' Move files back from destination to source
+    Dim fileName, sourcePath, destPath
+    For Each fileName In filesToMove
+        sourcePath = FSO.BuildPath(destDir, fileName)
+        destPath = FSO.BuildPath(sourceDir, "\")
+        If FSO.FileExists(sourcePath) Then
+            FSO.MoveFile sourcePath, destPath
+        End If
+    Next
+    
+    ' Go back to the previous folder index to re-process it
+    currentFolderIndex = currentFolderIndex - 1
+
+    ' Clean up empty 'moved' subfolder
+    If FSO.GetFolder(destDir).Files.Count = 0 And FSO.GetFolder(destDir).SubFolders.Count = 0 Then
+        FSO.DeleteFolder destDir
+    End If
+    
+    document.getElementById("status").innerHTML = "Redo successful. Moved " & count & " file(s) back to '" & FSO.GetFileName(sourceDir) & "'."
+    
+    ' Reset redo state
+    lastMove.RemoveAll
+    document.getElementById("btnRedo").disabled = True
+    
+    ProcessNextFolder
+End Sub
+
+</script>
+</head>
+<body>
+
+<div id="mainContainer">
+    <h2>Folder Image Processor</h2>
+    <div id="currentFolderDisplay">Initializing...</div>
+    <p>Select up to 4 images from the folder below and click "Move".</p>
+
+    <div id="fileList">
+        <!-- Image files with checkboxes will be dynamically inserted here -->
+    </div>
+
+    <div id="controls">
+        <button id="btnMove" class="button" onclick="MoveSelectedFiles">Move Selected Files</button>
+        <button id="btnSkip" class="button" onclick="SkipFolder">Skip Folder</button>
+        <button id="btnRedo" class="button" onclick="RedoLastMove">Redo Last Move</button>
+    </div>
+
+    <div id="status"></div>
+</div>
+
+</body>
+</html>

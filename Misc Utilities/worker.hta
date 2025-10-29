@@ -1,440 +1,440 @@
-<html>
-<head>
-<title>Keep One (Single Explorer Window) — Single</title>
-<HTA:APPLICATION
-  ID="app"
-  APPLICATIONNAME="Keep Single (Explorer)"
-  SINGLEINSTANCE="yes"
-  SCROLL="no"
-  BORDER="thin"
-  CAPTION="yes"
-  SHOWINTASKBAR="yes"
-  SYSMENU="yes"
-/>
-<style>
-  body { font-family: Segoe UI, Arial, sans-serif; margin:14px; }
-  .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap: wrap; }
-  label { min-width: 72px; }
-  input[type=text]{ width:520px; padding:6px; }
-  button { padding:8px 12px; cursor:pointer; }
-  #log { border:1px solid #ccc; padding:8px; height:200px; overflow:auto; white-space:pre-wrap; margin-top:6px; }
-  #progress { margin-left:8px; color:#555; }
-</style>
-<script language="JScript">
-(function(){
-  var fso   = new ActiveXObject("Scripting.FileSystemObject");
-  var shell = new ActiveXObject("Shell.Application");
+  <html>
+  <head>
+  <title>Keep One (Single Explorer Window) — Single</title>
+  <HTA:APPLICATION
+    ID="app"
+    APPLICATIONNAME="Keep Single (Explorer)"
+    SINGLEINSTANCE="yes"
+    SCROLL="no"
+    BORDER="thin"
+    CAPTION="yes"
+    SHOWINTASKBAR="yes"
+    SYSMENU="yes"
+  />
+  <style>
+    body { font-family: Segoe UI, Arial, sans-serif; margin:14px; }
+    .row { display:flex; gap:8px; align-items:center; margin:6px 0; flex-wrap: wrap; }
+    label { min-width: 72px; }
+    input[type=text]{ width:520px; padding:6px; }
+    button { padding:8px 12px; cursor:pointer; }
+    #log { border:1px solid #ccc; padding:8px; height:200px; overflow:auto; white-space:pre-wrap; margin-top:6px; }
+    #progress { margin-left:8px; color:#555; }
+  </style>
+  <script language="JScript">
+  (function(){
+    var fso   = new ActiveXObject("Scripting.FileSystemObject");
+    var shell = new ActiveXObject("Shell.Application");
 
-  var IMAGE_EXTS = { ".jpg":1, ".jpeg":1, ".png":1, ".heic":1, ".webp":1, ".tif":1, ".tiff":1, ".bmp":1, ".dng":1 };
+    var IMAGE_EXTS = { ".jpg":1, ".jpeg":1, ".png":1, ".heic":1, ".webp":1, ".tif":1, ".tiff":1, ".bmp":1, ".dng":1 };
 
-  var state = {
-    root: "", trash: "", keepRoot: "", subfolders: [], idx: 0,
-    reuse: true, closeAfterKeep: false, flatStruct: false
-  };
+    var state = {
+      root: "", trash: "", keepRoot: "", subfolders: [], idx: 0,
+      reuse: true, closeAfterKeep: false, flatStruct: false
+    };
 
-  // one-level undo buffer describing last "keep"
-  var lastAction = null; // { idx, curFolder, moves:[{from,to}], copies:[{from,to}] }
+    // one-level undo buffer describing last "keep"
+    var lastAction = null; // { idx, curFolder, moves:[{from,to}], copies:[{from,to}] }
 
-  function log(msg){ var el = document.getElementById("log"); el.innerText += msg + "\n"; el.scrollTop = el.scrollHeight; }
-  function setProg(){
-    document.getElementById("progress").innerText =
-      state.subfolders.length ? ("Folder " + (state.idx+1) + " of " + state.subfolders.length) : "";
-  }
-  function extLower(p){ var i=p.lastIndexOf("."); return i>=0 ? p.substr(i).toLowerCase() : ""; }
-  function samePath(a,b){ return (a||"").toLowerCase()===(b||"").toLowerCase(); }
-  function folderName(p){ return fso.GetFileName(p); }
-
-  function chooseRoot(){
-    try{
-      var folder = shell.BrowseForFolder(0, "Choose ROOT (contains subfolders)", 0x001);
-      if (!folder) return;
-      var p = folder.Self.Path;
-      document.getElementById("root").value = p;
-      document.getElementById("trash").value = p + "\\_CentralTrash";
-      document.getElementById("keepRoot").value = p + "\\_SelectedCopies";
-    }catch(e){ alert("Picker failed: " + e.message); }
-  }
-
-  function scan(){
-    var root    = document.getElementById("root").value.replace(/\"/g,"");
-    var trash   = document.getElementById("trash").value.replace(/\"/g,"");
-    var keepTo  = document.getElementById("keepRoot").value.replace(/\"/g,"");
-
-    state.reuse = document.getElementById("reuse").checked;
-    state.closeAfterKeep = document.getElementById("closeAfter").checked;
-    state.flatStruct = document.getElementById("flat").checked;
-
-    if (!root || !fso.FolderExists(root)) { alert("Root does not exist."); return; }
-    if (!keepTo){ alert("Please specify a 'Keep To' destination."); return; }
-    if (!fso.FolderExists(trash)) fso.CreateFolder(trash);
-    if (!fso.FolderExists(keepTo)) fso.CreateFolder(keepTo);
-
-    var arr = [];
-    var e = new Enumerator(fso.GetFolder(root).SubFolders);
-    for (; !e.atEnd(); e.moveNext()){
-      var sf = e.item();
-      if (samePath(sf.Path, trash)) continue; // skip central trash
-      if (samePath(sf.Path, keepTo)) continue; // skip keep root
-      arr.push(sf.Path);
+    function log(msg){ var el = document.getElementById("log"); el.innerText += msg + "\n"; el.scrollTop = el.scrollHeight; }
+    function setProg(){
+      document.getElementById("progress").innerText =
+        state.subfolders.length ? ("Folder " + (state.idx+1) + " of " + state.subfolders.length) : "";
     }
-    arr.sort();
+    function extLower(p){ var i=p.lastIndexOf("."); return i>=0 ? p.substr(i).toLowerCase() : ""; }
+    function samePath(a,b){ return (a||"").toLowerCase()===(b||"").toLowerCase(); }
+    function folderName(p){ return fso.GetFileName(p); }
 
-    state.root = root; state.trash = trash; state.keepRoot = keepTo; state.subfolders = arr; state.idx = 0;
-    document.getElementById("log").innerText = "";
-    lastAction = null;
-    log("Scanned " + arr.length + " subfolders.");
-    setProg();
+    function chooseRoot(){
+      try{
+        var folder = shell.BrowseForFolder(0, "Choose ROOT (contains subfolders)", 0x001);
+        if (!folder) return;
+        var p = folder.Self.Path;
+        document.getElementById("root").value = p;
+        document.getElementById("trash").value = p + "\\_CentralTrash";
+        document.getElementById("keepRoot").value = p + "\\_SelectedCopies";
+      }catch(e){ alert("Picker failed: " + e.message); }
+    }
 
-    if (arr.length) openCurrent(/*reuse*/true);
-  }
+    function scan(){
+      var root    = document.getElementById("root").value.replace(/\"/g,"");
+      var trash   = document.getElementById("trash").value.replace(/\"/g,"");
+      var keepTo  = document.getElementById("keepRoot").value.replace(/\"/g,"");
 
-  function listFirstImage(folder){
-    try{
-      var files = new Enumerator(fso.GetFolder(folder).Files);
-      var first = null;
+      state.reuse = document.getElementById("reuse").checked;
+      state.closeAfterKeep = document.getElementById("closeAfter").checked;
+      state.flatStruct = document.getElementById("flat").checked;
+
+      if (!root || !fso.FolderExists(root)) { alert("Root does not exist."); return; }
+      if (!keepTo){ alert("Please specify a 'Keep To' destination."); return; }
+      if (!fso.FolderExists(trash)) fso.CreateFolder(trash);
+      if (!fso.FolderExists(keepTo)) fso.CreateFolder(keepTo);
+
+      var arr = [];
+      var e = new Enumerator(fso.GetFolder(root).SubFolders);
+      for (; !e.atEnd(); e.moveNext()){
+        var sf = e.item();
+        if (samePath(sf.Path, trash)) continue; // skip central trash
+        if (samePath(sf.Path, keepTo)) continue; // skip keep root
+        arr.push(sf.Path);
+      }
+      arr.sort();
+
+      state.root = root; state.trash = trash; state.keepRoot = keepTo; state.subfolders = arr; state.idx = 0;
+      document.getElementById("log").innerText = "";
+      lastAction = null;
+      log("Scanned " + arr.length + " subfolders.");
+      setProg();
+
+      if (arr.length) openCurrent(/*reuse*/true);
+    }
+
+    function listFirstImage(folder){
+      try{
+        var files = new Enumerator(fso.GetFolder(folder).Files);
+        var first = null;
+        for (; !files.atEnd(); files.moveNext()){
+          var fp = files.item().Path;
+          if (IMAGE_EXTS[extLower(fp)]) { first = first || fp; }
+        }
+        return first;
+      }catch(e){ return null; }
+    }
+
+    // Find Explorer window currently showing a specific folder
+    function findExplorerFor(folderPath){
+      try{
+        var wins = shell.Windows();
+        for (var i=0; i<wins.Count; i++){
+          var w = wins.Item(i); if (!w) continue;
+          try{
+            var doc = w.Document;
+            if (!doc || !doc.Folder) continue;
+            var shown = doc.Folder.Self.Path;
+            if (samePath(shown, folderPath)) return w;
+          }catch(e){}
+        }
+      }catch(e){}
+      return null;
+    }
+
+    // Find any Explorer window (to reuse) — prefer one showing our root
+    function findAnyExplorer(){
+      try{
+        var wins = shell.Windows();
+        for (var i=0; i<wins.Count; i++){
+          var w = wins.Item(i); if (!w) continue;
+          try{
+            var doc = w.Document;
+            if (!doc || !doc.Folder) continue;
+            var shown = doc.Folder.Self.Path;
+            if (shown && shown.indexOf(state.root)===0) return w;
+          }catch(e){}
+        }
+        for (var j=0; j<wins.Count; j++){
+          var ww = wins.Item(j); if (!ww) continue;
+          try{
+            if (ww.Document && ww.Document.Folder) return ww;
+          }catch(e){}
+        }
+      }catch(e){}
+      return null;
+    }
+
+    function openCurrent(){
+      if (state.idx >= state.subfolders.length){ log("Done."); return; }
+      var folder = state.subfolders[state.idx];
+      var firstImg = listFirstImage(folder);
+
+      if (state.reuse){
+        var w = findAnyExplorer();
+        if (w){
+          try{
+            shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
+            log("Navigated Explorer → " + folder);
+            return;
+          }catch(e){}
+        }
+      }
+      try{
+        if (firstImg){
+          shell.ShellExecute("explorer.exe", "/select,\"" + firstImg + "\"", "", "open", 1);
+        }else{
+          shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
+        }
+        log("Opened: " + folder + "  (Tip: Ctrl+Shift+2 for Large icons)");
+      }catch(e){ log("! Could not open Explorer: " + e.message); }
+    }
+
+    // SINGLE SELECTION (exactly 1) for current folder
+    function getSelectionFor(curFolder){
+      try{
+        var wins = shell.Windows();
+        for (var i=0; i<wins.Count; i++){
+          var w = wins.Item(i);
+          if (!w) continue;
+          try{
+            var doc = w.Document;
+            if (!doc || !doc.Folder) continue;
+            var shown = doc.Folder.Self.Path;
+            if (!samePath(shown, curFolder)) continue;
+            var sel = doc.SelectedItems();
+            if (!sel || sel.Count < 1){ alert("Select exactly 1 image file in Explorer for:\n" + curFolder); return "NOT_ONE"; }
+            if (sel.Count > 1){ alert("Please select exactly 1 image (not multiple)."); return "NOT_ONE"; }
+            var p = sel.Item(0).Path;
+            if (IMAGE_EXTS[extLower(p)]) return [p];
+            alert("The selected item is not a supported image. Please pick a single image.");
+            return "NOT_ONE";
+          }catch(e){}
+        }
+      }catch(e){}
+      return "NOT_ONE";
+    }
+
+    function uniqueDest(destFull){
+      if (!fso.FileExists(destFull)){
+        return destFull;
+      }
+      var folder = fso.GetParentFolderName(destFull);
+      var name = fso.GetFileName(destFull);
+      var dot = name.lastIndexOf(".");
+      var base = dot >= 0 ? name.substr(0, dot) : name;
+      var ext  = dot >= 0 ? name.substr(dot) : "";
+      var i = 2, candidate;
+      do { candidate = folder + "\\" + base + "_v" + i + ext; i++; }
+      while (fso.FileExists(candidate));
+      return candidate;
+    }
+
+    function ensureFolder(p){
+      if (!fso.FolderExists(p)){
+        var parts = p.split("\\");
+        var cur = parts[0];
+        for (var i=1;i<parts.length;i++){
+          cur += "\\" + parts[i];
+          if (!fso.FolderExists(cur)){
+            try{ fso.CreateFolder(cur); }catch(e){}
+          }
+        }
+      }
+    }
+
+    // Copy selected image to keep-root (mirroring structure or flat)
+    function copySelectedToKeep(curFolder, selectedPaths, flat){
+      var copies = [];
+      var keepBase = state.keepRoot;
+      ensureFolder(keepBase);
+
+      var subName = folderName(curFolder);
+      var destDir = flat ? keepBase : (keepBase + "\\" + subName);
+      if (!flat) ensureFolder(destDir);
+
+      for (var i=0;i<selectedPaths.length;i++){
+        var src = selectedPaths[i];
+        var name = fso.GetFileName(src);
+        var dest = flat ? (keepBase + "\\" + subName + "__" + name)
+                        : (destDir   + "\\" + name);
+        dest = uniqueDest(dest);
+        try{
+          fso.CopyFile(src, dest, true);
+          copies.push({from: src, to: dest});
+        }catch(e){
+          log("  ! Copy failed: " + name + " (" + e.message + ")");
+        }
+      }
+      return copies;
+    }
+
+    // Move non-selected images to central trash
+    function moveOthersToCentral(curFolder, selectedSet, flat){
+      var moved = [];
+      var trashBase = state.trash;
+      ensureFolder(trashBase);
+
+      var subName = folderName(curFolder);
+      var destDir = flat ? trashBase : (trashBase + "\\" + subName);
+      if (!flat) ensureFolder(destDir);
+
+      var files = new Enumerator(fso.GetFolder(curFolder).Files);
       for (; !files.atEnd(); files.moveNext()){
         var fp = files.item().Path;
-        if (IMAGE_EXTS[extLower(fp)]) { first = first || fp; }
-      }
-      return first;
-    }catch(e){ return null; }
-  }
+        if (selectedSet[fp.toLowerCase()]) continue;
+        if (!IMAGE_EXTS[extLower(fp)]) continue;
 
-  // Find Explorer window currently showing a specific folder
-  function findExplorerFor(folderPath){
-    try{
-      var wins = shell.Windows();
-      for (var i=0; i<wins.Count; i++){
-        var w = wins.Item(i); if (!w) continue;
+        var name = fso.GetFileName(fp);
+        var dest = flat ? (trashBase + "\\" + subName + "__" + name)
+                        : (destDir   + "\\" + name);
+        dest = uniqueDest(dest);
+
         try{
-          var doc = w.Document;
-          if (!doc || !doc.Folder) continue;
-          var shown = doc.Folder.Self.Path;
-          if (samePath(shown, folderPath)) return w;
-        }catch(e){}
-      }
-    }catch(e){}
-    return null;
-  }
-
-  // Find any Explorer window (to reuse) — prefer one showing our root
-  function findAnyExplorer(){
-    try{
-      var wins = shell.Windows();
-      for (var i=0; i<wins.Count; i++){
-        var w = wins.Item(i); if (!w) continue;
-        try{
-          var doc = w.Document;
-          if (!doc || !doc.Folder) continue;
-          var shown = doc.Folder.Self.Path;
-          if (shown && shown.indexOf(state.root)===0) return w;
-        }catch(e){}
-      }
-      for (var j=0; j<wins.Count; j++){
-        var ww = wins.Item(j); if (!ww) continue;
-        try{
-          if (ww.Document && ww.Document.Folder) return ww;
-        }catch(e){}
-      }
-    }catch(e){}
-    return null;
-  }
-
-  function openCurrent(){
-    if (state.idx >= state.subfolders.length){ log("Done."); return; }
-    var folder = state.subfolders[state.idx];
-    var firstImg = listFirstImage(folder);
-
-    if (state.reuse){
-      var w = findAnyExplorer();
-      if (w){
-        try{
-          shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
-          log("Navigated Explorer → " + folder);
-          return;
-        }catch(e){}
-      }
-    }
-    try{
-      if (firstImg){
-        shell.ShellExecute("explorer.exe", "/select,\"" + firstImg + "\"", "", "open", 1);
-      }else{
-        shell.ShellExecute("explorer.exe", "\"" + folder + "\"", "", "open", 1);
-      }
-      log("Opened: " + folder + "  (Tip: Ctrl+Shift+2 for Large icons)");
-    }catch(e){ log("! Could not open Explorer: " + e.message); }
-  }
-
-  // SINGLE SELECTION (exactly 1) for current folder
-  function getSelectionFor(curFolder){
-    try{
-      var wins = shell.Windows();
-      for (var i=0; i<wins.Count; i++){
-        var w = wins.Item(i);
-        if (!w) continue;
-        try{
-          var doc = w.Document;
-          if (!doc || !doc.Folder) continue;
-          var shown = doc.Folder.Self.Path;
-          if (!samePath(shown, curFolder)) continue;
-          var sel = doc.SelectedItems();
-          if (!sel || sel.Count < 1){ alert("Select exactly 1 image file in Explorer for:\n" + curFolder); return "NOT_ONE"; }
-          if (sel.Count > 1){ alert("Please select exactly 1 image (not multiple)."); return "NOT_ONE"; }
-          var p = sel.Item(0).Path;
-          if (IMAGE_EXTS[extLower(p)]) return [p];
-          alert("The selected item is not a supported image. Please pick a single image.");
-          return "NOT_ONE";
-        }catch(e){}
-      }
-    }catch(e){}
-    return "NOT_ONE";
-  }
-
-  function uniqueDest(destFull){
-    if (!fso.FileExists(destFull)){
-      return destFull;
-    }
-    var folder = fso.GetParentFolderName(destFull);
-    var name = fso.GetFileName(destFull);
-    var dot = name.lastIndexOf(".");
-    var base = dot >= 0 ? name.substr(0, dot) : name;
-    var ext  = dot >= 0 ? name.substr(dot) : "";
-    var i = 2, candidate;
-    do { candidate = folder + "\\" + base + "_v" + i + ext; i++; }
-    while (fso.FileExists(candidate));
-    return candidate;
-  }
-
-  function ensureFolder(p){
-    if (!fso.FolderExists(p)){
-      var parts = p.split("\\");
-      var cur = parts[0];
-      for (var i=1;i<parts.length;i++){
-        cur += "\\" + parts[i];
-        if (!fso.FolderExists(cur)){
-          try{ fso.CreateFolder(cur); }catch(e){}
+          fso.MoveFile(fp, dest);
+          moved.push({from: fp, to: dest});
+        }catch(e){
+          log("  ! Move failed: " + name + " (" + e.message + ")");
         }
       }
+      return moved;
     }
-  }
 
-  // Copy selected image to keep-root (mirroring structure or flat)
-  function copySelectedToKeep(curFolder, selectedPaths, flat){
-    var copies = [];
-    var keepBase = state.keepRoot;
-    ensureFolder(keepBase);
+    function reopen(){ openCurrent(); }
 
-    var subName = folderName(curFolder);
-    var destDir = flat ? keepBase : (keepBase + "\\" + subName);
-    if (!flat) ensureFolder(destDir);
+    function keepSelected(){
+      if (state.idx >= state.subfolders.length) return;
+      var cur = state.subfolders[state.idx];
 
-    for (var i=0;i<selectedPaths.length;i++){
-      var src = selectedPaths[i];
-      var name = fso.GetFileName(src);
-      var dest = flat ? (keepBase + "\\" + subName + "__" + name)
-                      : (destDir   + "\\" + name);
-      dest = uniqueDest(dest);
-      try{
-        fso.CopyFile(src, dest, true);
-        copies.push({from: src, to: dest});
-      }catch(e){
-        log("  ! Copy failed: " + name + " (" + e.message + ")");
+      var chosen = getSelectionFor(cur);
+      if (chosen === "NOT_ONE") return;
+
+      // Build quick lookup set for selected
+      var selSet = {};
+      for (var i=0;i<chosen.length;i++){ selSet[chosen[i].toLowerCase()] = 1; }
+
+      // Perform copy + move
+      var copies = copySelectedToKeep(cur, chosen, state.flatStruct);
+      var moves  = moveOthersToCentral(cur, selSet, state.flatStruct);
+
+      log('Selected (1) copied → ' + state.keepRoot);
+      log('Others moved (' + moves.length + ') → ' + state.trash);
+
+      // Save undo
+      lastAction = { idx: state.idx, curFolder: cur, moves: moves, copies: copies };
+
+      // advance index
+      state.idx++; setProg();
+
+      // navigate logic
+      if (state.reuse && state.idx < state.subfolders.length){
+        var nextFolder = state.subfolders[state.idx];
+        var w = findExplorerFor(cur);
+        if (!w) w = findAnyExplorer();
+        if (w){
+          try{ w.Navigate2(nextFolder); log("Navigated Explorer → " + nextFolder); return; }catch(e){}
+        }
+        openCurrent();
+      } else if (state.closeAfterKeep){
+        var w2 = findExplorerFor(cur);
+        if (w2){ try{ w2.Quit(); }catch(e){} }
+        if (state.idx < state.subfolders.length) openCurrent();
+      } else {
+        if (state.idx < state.subfolders.length) openCurrent();
       }
     }
-    return copies;
-  }
 
-  // Move non-selected images to central trash
-  function moveOthersToCentral(curFolder, selectedSet, flat){
-    var moved = [];
-    var trashBase = state.trash;
-    ensureFolder(trashBase);
-
-    var subName = folderName(curFolder);
-    var destDir = flat ? trashBase : (trashBase + "\\" + subName);
-    if (!flat) ensureFolder(destDir);
-
-    var files = new Enumerator(fso.GetFolder(curFolder).Files);
-    for (; !files.atEnd(); files.moveNext()){
-      var fp = files.item().Path;
-      if (selectedSet[fp.toLowerCase()]) continue;
-      if (!IMAGE_EXTS[extLower(fp)]) continue;
-
-      var name = fso.GetFileName(fp);
-      var dest = flat ? (trashBase + "\\" + subName + "__" + name)
-                      : (destDir   + "\\" + name);
-      dest = uniqueDest(dest);
-
-      try{
-        fso.MoveFile(fp, dest);
-        moved.push({from: fp, to: dest});
-      }catch(e){
-        log("  ! Move failed: " + name + " (" + e.message + ")");
-      }
+    function skipFolder(){
+      log("Skipped: " + state.subfolders[state.idx]);
+      state.idx++; setProg();
+      if (state.idx < state.subfolders.length) openCurrent();
+      else log("All done.");
     }
-    return moved;
-  }
 
-  function reopen(){ openCurrent(); }
+    // REDO (undo last keep): move files back from trash to original; delete copies from keep
+    function redoLast(){
+      if (!lastAction){ alert("Nothing to redo."); return; }
 
-  function keepSelected(){
-    if (state.idx >= state.subfolders.length) return;
-    var cur = state.subfolders[state.idx];
+      var restored = 0, deleted = 0, conflicts = 0;
 
-    var chosen = getSelectionFor(cur);
-    if (chosen === "NOT_ONE") return;
+      // restore moved files
+      for (var i=0;i<lastAction.moves.length;i++){
+        var m = lastAction.moves[i];
+        try{
+          var toPath = m.to;     // currently in trash
+          var backTo = m.from;   // original spot
+          var backFolder = fso.GetParentFolderName(backTo);
+          ensureFolder(backFolder);
 
-    // Build quick lookup set for selected
-    var selSet = {};
-    for (var i=0;i<chosen.length;i++){ selSet[chosen[i].toLowerCase()] = 1; }
-
-    // Perform copy + move
-    var copies = copySelectedToKeep(cur, chosen, state.flatStruct);
-    var moves  = moveOthersToCentral(cur, selSet, state.flatStruct);
-
-    log('Selected (1) copied → ' + state.keepRoot);
-    log('Others moved (' + moves.length + ') → ' + state.trash);
-
-    // Save undo
-    lastAction = { idx: state.idx, curFolder: cur, moves: moves, copies: copies };
-
-    // advance index
-    state.idx++; setProg();
-
-    // navigate logic
-    if (state.reuse && state.idx < state.subfolders.length){
-      var nextFolder = state.subfolders[state.idx];
-      var w = findExplorerFor(cur);
-      if (!w) w = findAnyExplorer();
-      if (w){
-        try{ w.Navigate2(nextFolder); log("Navigated Explorer → " + nextFolder); return; }catch(e){}
+          var finalDest = backTo;
+          if (fso.FileExists(finalDest)){
+            // avoid overwrite — create a unique _restored* name beside original
+            var name = fso.GetFileName(backTo);
+            var dot  = name.lastIndexOf(".");
+            var base = dot>=0 ? name.substr(0,dot) : name;
+            var ext  = dot>=0 ? name.substr(dot)   : "";
+            var candidate = backFolder + "\\" + base + "_restored" + ext;
+            finalDest = uniqueDest(candidate);
+            conflicts++;
+          }
+          if (fso.FileExists(toPath)){
+            fso.MoveFile(toPath, finalDest);
+            restored++;
+          }
+        }catch(e){
+          log("  ! Restore failed: " + m.to + " (" + e.message + ")");
+        }
       }
+
+      // delete copied keep files
+      for (var j=0;j<lastAction.copies.length;j++){
+        var c = lastAction.copies[j];
+        try{
+          if (fso.FileExists(c.to)) { fso.DeleteFile(c.to, true); deleted++; }
+        }catch(e){
+          log("  ! Delete failed: " + c.to + " (" + e.message + ")");
+        }
+      }
+
+      // reset index to that folder and reopen
+      state.idx = lastAction.idx;
+      setProg();
       openCurrent();
-    } else if (state.closeAfterKeep){
-      var w2 = findExplorerFor(cur);
-      if (w2){ try{ w2.Quit(); }catch(e){} }
-      if (state.idx < state.subfolders.length) openCurrent();
-    } else {
-      if (state.idx < state.subfolders.length) openCurrent();
-    }
-  }
 
-  function skipFolder(){
-    log("Skipped: " + state.subfolders[state.idx]);
-    state.idx++; setProg();
-    if (state.idx < state.subfolders.length) openCurrent();
-    else log("All done.");
-  }
-
-  // REDO (undo last keep): move files back from trash to original; delete copies from keep
-  function redoLast(){
-    if (!lastAction){ alert("Nothing to redo."); return; }
-
-    var restored = 0, deleted = 0, conflicts = 0;
-
-    // restore moved files
-    for (var i=0;i<lastAction.moves.length;i++){
-      var m = lastAction.moves[i];
-      try{
-        var toPath = m.to;     // currently in trash
-        var backTo = m.from;   // original spot
-        var backFolder = fso.GetParentFolderName(backTo);
-        ensureFolder(backFolder);
-
-        var finalDest = backTo;
-        if (fso.FileExists(finalDest)){
-          // avoid overwrite — create a unique _restored* name beside original
-          var name = fso.GetFileName(backTo);
-          var dot  = name.lastIndexOf(".");
-          var base = dot>=0 ? name.substr(0,dot) : name;
-          var ext  = dot>=0 ? name.substr(dot)   : "";
-          var candidate = backFolder + "\\" + base + "_restored" + ext;
-          finalDest = uniqueDest(candidate);
-          conflicts++;
-        }
-        if (fso.FileExists(toPath)){
-          fso.MoveFile(toPath, finalDest);
-          restored++;
-        }
-      }catch(e){
-        log("  ! Restore failed: " + m.to + " (" + e.message + ")");
-      }
+      log("Redo complete → Restored: " + restored + ", Deleted copies: " + deleted + (conflicts ? (", Name conflicts: " + conflicts) : ""));
+      lastAction = null;
     }
 
-    // delete copied keep files
-    for (var j=0;j<lastAction.copies.length;j++){
-      var c = lastAction.copies[j];
-      try{
-        if (fso.FileExists(c.to)) { fso.DeleteFile(c.to, true); deleted++; }
-      }catch(e){
-        log("  ! Delete failed: " + c.to + " (" + e.message + ")");
-      }
-    }
+    // UI hookup
+    window.chooseRoot = chooseRoot;
+    window.scan = scan;
+    window.reopen = reopen;
+    window.keepSelected = keepSelected;
+    window.skipFolder = skipFolder;
+    window.redoLast = redoLast;
 
-    // reset index to that folder and reopen
-    state.idx = lastAction.idx;
-    setProg();
-    openCurrent();
+    // defaults
+    window.onload = function(){
+      document.getElementById("root").value     = "C:\\Roshaan\\iCloudSingles";
+      document.getElementById("trash").value    = "C:\\Roshaan\\iCloudSingles\\_CentralTrash";
+      document.getElementById("keepRoot").value = "C:\\Roshaan\\iCloudSingles\\_SelectedCopies";
+      document.getElementById("reuse").checked = true;       // reuse same window (navigate)
+      document.getElementById("closeAfter").checked = false; // or close after keep
+      document.getElementById("flat").checked = false;       // structured by subfolder
+    };
+  })();
+  </script>
+  </head>
+  <body>
+    <div class="row">
+      <label>Root:</label>
+      <input id="root" type="text" />
+      <button onclick="chooseRoot()">Browse…</button>
+    </div>
+    <div class="row">
+      <label>Trash:</label>
+      <input id="trash" type="text" />
+    </div>
+    <div class="row">
+      <label>Keep To:</label>
+      <input id="keepRoot" type="text" />
+    </div>
 
-    log("Redo complete → Restored: " + restored + ", Deleted copies: " + deleted + (conflicts ? (", Name conflicts: " + conflicts) : ""));
-    lastAction = null;
-  }
+    <div class="row">
+      <label style="min-width:0;">Options:</label>
+      <label><input id="reuse" type="checkbox" /> Reuse SAME Explorer window (navigate)</label>
+      <label><input id="closeAfter" type="checkbox" /> Close Explorer after “Keep”</label>
+      <label><input id="flat" type="checkbox" /> Flat structure (trash & keep)</label>
+      <span id="progress"></span>
+    </div>
 
-  // UI hookup
-  window.chooseRoot = chooseRoot;
-  window.scan = scan;
-  window.reopen = reopen;
-  window.keepSelected = keepSelected;
-  window.skipFolder = skipFolder;
-  window.redoLast = redoLast;
+    <div class="row">
+      <button onclick="scan()">Start / Rescan</button>
+      <button onclick="reopen()">Reopen Folder</button>
+      <button onclick="keepSelected()">Keep Selected</button>
+      <button onclick="skipFolder()">Skip</button>
+      <button onclick="redoLast()">Redo Last</button>
+    </div>
 
-  // defaults
-  window.onload = function(){
-    document.getElementById("root").value     = "C:\\Roshaan\\iCloudSingles";
-    document.getElementById("trash").value    = "C:\\Roshaan\\iCloudSingles\\_CentralTrash";
-    document.getElementById("keepRoot").value = "C:\\Roshaan\\iCloudSingles\\_SelectedCopies";
-    document.getElementById("reuse").checked = true;       // reuse same window (navigate)
-    document.getElementById("closeAfter").checked = false; // or close after keep
-    document.getElementById("flat").checked = false;       // structured by subfolder
-  };
-})();
-</script>
-</head>
-<body>
-  <div class="row">
-    <label>Root:</label>
-    <input id="root" type="text" />
-    <button onclick="chooseRoot()">Browse…</button>
-  </div>
-  <div class="row">
-    <label>Trash:</label>
-    <input id="trash" type="text" />
-  </div>
-  <div class="row">
-    <label>Keep To:</label>
-    <input id="keepRoot" type="text" />
-  </div>
-
-  <div class="row">
-    <label style="min-width:0;">Options:</label>
-    <label><input id="reuse" type="checkbox" /> Reuse SAME Explorer window (navigate)</label>
-    <label><input id="closeAfter" type="checkbox" /> Close Explorer after “Keep”</label>
-    <label><input id="flat" type="checkbox" /> Flat structure (trash & keep)</label>
-    <span id="progress"></span>
-  </div>
-
-  <div class="row">
-    <button onclick="scan()">Start / Rescan</button>
-    <button onclick="reopen()">Reopen Folder</button>
-    <button onclick="keepSelected()">Keep Selected</button>
-    <button onclick="skipFolder()">Skip</button>
-    <button onclick="redoLast()">Redo Last</button>
-  </div>
-
-  <div id="log"></div>
-  <div style="margin-top:6px;color:#444;">
-    In Explorer, press <b>Ctrl+Shift+2</b> once for Large icons. Select <b>exactly 1</b> image, then click <b>Keep Selected</b>.
-    The selected image is <b>copied</b> to “Keep To”; the rest are <b>moved</b> to “Trash”. Use <b>Redo Last</b> to reverse the previous keep.
-  </div>
-</body>
-</html>
+    <div id="log"></div>
+    <div style="margin-top:6px;color:#444;">
+      In Explorer, press <b>Ctrl+Shift+2</b> once for Large icons. Select <b>exactly 1</b> image, then click <b>Keep Selected</b>.
+      The selected image is <b>copied</b> to “Keep To”; the rest are <b>moved</b> to “Trash”. Use <b>Redo Last</b> to reverse the previous keep.
+    </div>
+  </body>
+  </html>
