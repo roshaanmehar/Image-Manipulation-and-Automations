@@ -1,257 +1,184 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
-"""
-Process PNGs under C:\Roshaan\output_images\_MovedFiles\, send each to OpenAI gpt-image-1
-to produce a 1024x1024 PNG with a pure white (#FFFFFF) background, without changing the
-product’s appearance. Saves results under ...\_MovedFiles\OPENAI\<same-subfolders>\ with
-the same filename (overwriting if it exists).
-
-Usage (PowerShell / CMD):
-    python process_openai_white_bg.py
-    python process_openai_white_bg.py --dry-run
-    python process_openai_white_bg.py --test   (only first 5 subfolders)
-"""
-
-import base64
 import os
-import sys
-import time
-import json
-import argparse
-from typing import Optional, Tuple
+import io
+import base64
 import requests
+from openai import OpenAI
+from PIL import Image
 
-try:
-    from openai import OpenAI
-    _HAS_OPENAI_SDK = True
-except Exception:
-    _HAS_OPENAI_SDK = False
+# --- SCRIPT CONFIGURATION ---
 
-try:
-    from tqdm import tqdm
-    _HAS_TQDM = True
-except Exception:
-    _HAS_TQDM = False
+# 1. Set the root folder where your subfolders of images are located.
+ROOT_FOLDER = r"C:\Roshaan\output_images\_MovedFiles"
 
+# 2. Set the name for the main output folder.
+OUTPUT_FOLDER_NAME = "OPENAI"
 
-# -------- Configuration --------
-ROOT_DIR = r"C:\Roshaan\output_images\_MovedFiles"
-OUTPUT_ROOT = os.path.join(ROOT_DIR, "OPENAI")
-MODEL = "gpt-image-1"
-SIZE = "1024x1024"
-ALLOWED_EXTS = {".png"}
-MAX_RETRIES = 6
-INITIAL_DELAY = 1.0
-TIMEOUT = 120
+# 3. Set to True to only process the first 5 subfolders for a quick test.
+TEST_MODE = True
+TEST_MODE_SUBFOLDER_LIMIT = 5
 
-PROMPT = (
-    "Return a single 1024x1024 PNG. Replace only the background with pure white (#FFFFFF). "
-    "Remove any grey from the background. Do not in any way alter the product or its appearance, "
-    "including colours, lighting, geometry, texture, reflections, shadows on the product, or any details. "
-    "Keep the product exactly as-is; change the background only."
-)
+# --- END OF CONFIGURATION ---
 
 
-# -------- Helpers --------
-def is_inside_output_dir(path: str) -> bool:
-    out = os.path.abspath(OUTPUT_ROOT)
-    p = os.path.abspath(path)
-    return p.startswith(out)
-
-
-def iter_source_pngs(root_dir: str, test_mode: bool = False):
+def initialize_openai_client():
     """
-    Yield all PNGs in root_dir. If test_mode=True, restrict to first 5 unique subfolders.
+    Initializes and returns the OpenAI client.
+    Reads the API key from the 'OPENAI_API_KEY' environment variable.
     """
-    counted_subfolders = set()
-    allowed_subfolders = set()
-
-    for dirpath, dirnames, filenames in os.walk(root_dir):
-        if is_inside_output_dir(dirpath):
-            continue
-
-        # Determine top-level subfolder relative to root
-        rel = os.path.relpath(dirpath, root_dir)
-        parts = rel.split(os.sep)
-        top = parts[0] if parts[0] != "." else "."
-
-        if test_mode:
-            if top not in counted_subfolders and top != ".":
-                counted_subfolders.add(top)
-                if len(counted_subfolders) > 5:
-                    continue
-            if len(counted_subfolders) <= 5:
-                allowed_subfolders = counted_subfolders.copy()
-            else:
-                continue
-
-            if top != "." and top not in allowed_subfolders:
-                continue
-
-        for name in filenames:
-            ext = os.path.splitext(name)[1].lower()
-            if ext in ALLOWED_EXTS:
-                yield os.path.join(dirpath, name)
-
-
-def ensure_dir(path: str):
-    os.makedirs(path, exist_ok=True)
-
-
-def dest_path_for(src_path: str) -> Tuple[str, str]:
-    rel_dir = os.path.relpath(os.path.dirname(src_path), ROOT_DIR)
-    if rel_dir == ".":
-        rel_dir = ""
-    dest_dir = os.path.join(OUTPUT_ROOT, rel_dir)
-    ensure_dir(dest_dir)
-    dest_file = os.path.join(dest_dir, os.path.basename(src_path))
-    return dest_dir, dest_file
-
-
-def exponential_backoff_attempts(max_tries: int = MAX_RETRIES, initial_delay: float = INITIAL_DELAY):
-    delay = initial_delay
-    for attempt in range(1, max_tries + 1):
-        yield attempt, delay
-        delay *= 2.0
-
-
-def decode_and_save_png(b64_data: str, dest_file: str):
-    raw = base64.b64decode(b64_data)
-    with open(dest_file, "wb") as f:
-        f.write(raw)
-
-
-# -------- OpenAI Calls --------
-def call_openai_via_sdk(image_path: str) -> Optional[str]:
-    if not _HAS_OPENAI_SDK:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        print("ERROR: The 'OPENAI_API_KEY' environment variable is not set.")
+        print("Please set the environment variable and try again.")
         return None
+    return OpenAI(api_key=api_key)
 
+
+def get_subfolders(path):
+    """Returns a sorted list of subfolders in a given path."""
     try:
-        client = OpenAI(timeout=TIMEOUT)
-        with open(image_path, "rb") as f:
-            try:
-                resp = client.images.edits(
-                    model=MODEL,
-                    image=f,
-                    prompt=PROMPT,
-                    size=SIZE,
-                    n=1,
-                    response_format="b64_json",
-                )
-            except TypeError:
-                f.seek(0)
-                resp = client.images.edits(
-                    model=MODEL,
-                    image=[f],
-                    prompt=PROMPT,
-                    size=SIZE,
-                    n=1,
-                    response_format="b64_json",
-                )
-
-        data = getattr(resp, "data", None) or resp.get("data")
-        if data and len(data) > 0:
-            b64 = data[0].get("b64_json")
-            return b64
-        return None
-    except Exception:
-        return None
+        return sorted([f.path for f in os.scandir(path) if f.is_dir()])
+    except FileNotFoundError:
+        return []
 
 
-def call_openai_via_http(image_path: str, api_key: str) -> Optional[str]:
-    url = "https://api.openai.com/v1/images/edits"
-    headers = {"Authorization": f"Bearer {api_key}"}
-    files = {"image": (os.path.basename(image_path), open(image_path, "rb"), "image/png")}
-    data = {
-        "model": MODEL,
-        "prompt": PROMPT,
-        "size": SIZE,
-        "n": 1,
-        "background": "white",
-        "response_format": "b64_json",
-    }
+def get_image_files(path):
+    """Returns a list of image files in a given path."""
+    supported_formats = ('.png', '.jpg', '.jpeg', '.webp', '.bmp')
+    return [file for file in os.listdir(path) if file.lower().endswith(supported_formats)]
 
+
+def process_image_with_openai(image_path, client):
+    """
+    Uses GPT-4 Vision to analyze the product, then DALL-E 3 to generate
+    a new version with a pure white background.
+    
+    Args:
+        image_path (str): The full path to the source image.
+        client (OpenAI): The initialized OpenAI client instance.
+
+    Returns:
+        str: The URL of the generated image, or None if an error occurred.
+    """
     try:
-        r = requests.post(url, headers=headers, files=files, data=data, timeout=TIMEOUT)
-        if r.status_code == 200:
-            j = r.json()
-            if "data" in j and j["data"]:
-                return j["data"][0].get("b64_json")
+        print(f"   - Analyzing with GPT-4 Vision: {os.path.basename(image_path)}")
+        
+        # Encode image to base64
+        with open(image_path, "rb") as image_file:
+            base64_image = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # Step 1: Use GPT-4 Vision to describe the product
+        vision_response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": (
+                                "Describe this product in detail for product photography recreation. "
+                                "Focus on: the exact item type, its shape, size proportions, colors, "
+                                "materials, textures, key features, and any text or branding visible. "
+                                "Be specific and detailed but concise."
+                            )
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}"
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=300
+        )
+        
+        product_description = vision_response.choices[0].message.content
+        print(f"   - Product description: {product_description[:100]}...")
+        
+        # Step 2: Use DALL-E 3 to generate the product with white background
+        print(f"   - Generating with DALL-E 3...")
+        dalle_prompt = (
+            f"{product_description} "
+            f"Professional product photography on a pure white background (#ffffff). "
+            f"Clean, centered, well-lit, no shadows, no reflections, no text overlay."
+        )
+        
+        dalle_response = client.images.generate(
+            model="dall-e-3",
+            prompt=dalle_prompt,
+            size="1024x1024",
+            quality="standard",
+            n=1
+        )
+        
+        image_url = dalle_response.data[0].url
+        return image_url
+
+    except Exception as e:
+        print(f"   - ERROR during OpenAI API call for {os.path.basename(image_path)}: {e}")
         return None
-    finally:
-        try:
-            files["image"][1].close()
-        except Exception:
-            pass
-
-
-def process_one_image(image_path: str, dest_file: str, api_key: str, dry_run: bool = False) -> bool:
-    if dry_run:
-        print(f"[DRY] Would process: {image_path} -> {dest_file}")
-        return True
-
-    for attempt, delay in exponential_backoff_attempts():
-        b64 = None
-        if _HAS_OPENAI_SDK:
-            b64 = call_openai_via_sdk(image_path)
-        if not b64:
-            b64 = call_openai_via_http(image_path, api_key)
-        if b64:
-            decode_and_save_png(b64, dest_file)
-            return True
-        if attempt < MAX_RETRIES:
-            time.sleep(delay)
-        else:
-            return False
-    return False
 
 
 def main():
-    parser = argparse.ArgumentParser(description="OpenAI white-background normaliser for PNGs.")
-    parser.add_argument("--dry-run", action="store_true", help="Don’t call API or write files; just print actions.")
-    parser.add_argument("--test", action="store_true", help="Process only the first 5 subfolders.")
-    args = parser.parse_args()
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key and not _HAS_OPENAI_SDK:
-        print("ERROR: OPENAI_API_KEY not set, and OpenAI SDK unavailable.", file=sys.stderr)
-        sys.exit(1)
-
-    print(f"Scanning: {ROOT_DIR}")
-    pngs = list(iter_source_pngs(ROOT_DIR, test_mode=args.test))
-
-    if args.test:
-        subs = {os.path.relpath(os.path.dirname(p), ROOT_DIR).split(os.sep)[0] for p in pngs}
-        print(f"[TEST MODE] Will process up to 5 subfolders: {sorted(subs)}")
-
-    if not pngs:
-        print("No PNG files found.")
+    """Main function to orchestrate the image processing workflow."""
+    print("--- Starting GPT-4 Vision + DALL-E 3 Background Correction Script ---")
+    
+    client = initialize_openai_client()
+    if not client:
         return
 
-    iterable = tqdm(pngs, desc="Processing", unit="img") if _HAS_TQDM else pngs
+    output_root_path = os.path.join(ROOT_FOLDER, OUTPUT_FOLDER_NAME)
+    
+    all_subfolders = get_subfolders(ROOT_FOLDER)
+    if not all_subfolders:
+        print(f"Error: No subfolders found in the directory: {ROOT_FOLDER}")
+        return
 
-    success, fail = 0, 0
-    for src in iterable:
-        try:
-            _, dest = dest_path_for(src)
-            ok = process_one_image(src, dest, api_key or "", dry_run=args.dry_run)
-            if ok:
-                success += 1
-            else:
-                fail += 1
-            if _HAS_TQDM:
-                iterable.set_postfix_str(f"ok={success} fail={fail}", refresh=False)
-            else:
-                print(f"{'OK' if ok else 'FAIL'}: {src}")
-        except KeyboardInterrupt:
-            print("\nInterrupted by user.")
-            break
-        except Exception as e:
-            fail += 1
-            print(f"ERROR processing {src}: {e}", file=sys.stderr)
+    all_subfolders = [folder for folder in all_subfolders if os.path.basename(folder) != OUTPUT_FOLDER_NAME]
 
-    print(f"\nDone. Success: {success}, Failed: {fail}")
+    folders_to_process = all_subfolders
+    if TEST_MODE:
+        print(f"\n--- TEST MODE ENABLED: Processing up to {TEST_MODE_SUBFOLDER_LIMIT} subfolders. ---\n")
+        folders_to_process = all_subfolders[:TEST_MODE_SUBFOLDER_LIMIT]
+
+    for folder_path in folders_to_process:
+        folder_name = os.path.basename(folder_path)
+        print(f"Processing folder: [{folder_name}]...")
+        
+        image_files = get_image_files(folder_path)
+        if not image_files:
+            print("   - No image files found in this folder. Skipping.")
+            continue
+
+        output_subfolder_path = os.path.join(output_root_path, folder_name)
+        os.makedirs(output_subfolder_path, exist_ok=True)
+
+        for image_name in image_files:
+            original_image_path = os.path.join(folder_path, image_name)
+            
+            processed_image_url = process_image_with_openai(original_image_path, client)
+            
+            if processed_image_url:
+                try:
+                    response = requests.get(processed_image_url)
+                    response.raise_for_status()
+
+                    image_data = Image.open(io.BytesIO(response.content))
+                    
+                    base_name, _ = os.path.splitext(image_name)
+                    output_image_path = os.path.join(output_subfolder_path, f"{base_name}.png")
+
+                    image_data.save(output_image_path, "PNG")
+                    print(f"   - ✔ Successfully saved to: {output_image_path}\n")
+
+                except requests.exceptions.RequestException as e:
+                    print(f"   - ERROR downloading image {image_name}: {e}\n")
+                except IOError as e:
+                    print(f"   - ERROR saving image {image_name}: {e}\n")
+
+    print("--- Script finished. All folders processed. ---")
 
 
 if __name__ == "__main__":
