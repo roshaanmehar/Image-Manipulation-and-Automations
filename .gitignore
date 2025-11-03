@@ -14,3 +14,7 @@ cat > .gitignore <<'EOF'
 !**/*.py
 !**/*.hta
 EOF
+
+
+
+/node_modules
