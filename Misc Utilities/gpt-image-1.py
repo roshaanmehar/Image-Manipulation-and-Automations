@@ -14,10 +14,10 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 # -------------------- CONFIG --------------------
-ROOT = Path(r"C:\Roshaan\output_images\_MovedFiles")
-CENTRAL_OUT = ROOT / "AIOPEN"
-ACCEPTED_EXT = {".png"}
-FORCE_SIZE = "1024x1024"
+ROOT = Path(r"C:\Roshaan\output_images\_MovedFiles")  # Root path where subfolders are located
+CENTRAL_OUT = ROOT / "AIOPEN"                         # Central output folder (AIOPEN)
+ACCEPTED_EXT = {".png"}                               # Only PNG files will be processed
+FORCE_SIZE = "1024x1024"                              # Fixed output size for images
 
 PROMPT = (
     "Convert the grey background to a solid pure white background (#FFFFFF). "
@@ -26,9 +26,9 @@ PROMPT = (
 )
 
 # Parallelism
-DEFAULT_WORKERS = int(os.getenv("PARALLEL_WORKERS", "4"))  # tweak via .env
+DEFAULT_WORKERS = int(os.getenv("PARALLEL_WORKERS", "4"))  # Number of parallel threads (from .env)
 
-# Retry knobs
+# Retry knobs (exponential backoff for retries)
 RETRY_MAX_ATTEMPTS = 5
 RETRY_BASE_DELAY_S = 1.5
 RETRY_MAX_DELAY_S = 12.0
@@ -62,7 +62,7 @@ if not NTFY_URL:
     if NTFY_BASE and NTFY_TOPIC:
         NTFY_URL = f"{NTFY_BASE.rstrip('/')}/{NTFY_TOPIC.lstrip('/')}"
     else:
-        NTFY_URL = "https://ntfy.sh/cooksdepo"  # your fixed topic URL
+        NTFY_URL = "https://ntfy.sh/cooksdepo"  # Your fixed topic URL
 
 
 def _sanitize_http_header_value(v: str | None) -> str | None:
@@ -147,7 +147,7 @@ def edit_image_single(file_path: Path) -> bytes:
                 output_format="png",
                 quality="high",
                 input_fidelity="high",
-                size=FORCE_SIZE,
+                size="1024x1024",  # Ensure it's 1024x1024
             )
         return base64.b64decode(resp.data[0].b64_json)
 
@@ -159,6 +159,7 @@ def discover_tasks() -> List[Tuple[Path, Path]]:
     """
     Find immediate subfolders and queue each PNG:
     (src_path, dst_path) where dst is under CENTRAL_OUT/<subfolder>/<filename>.png
+    Skip images that already exist in the destination directory.
     """
     tasks: List[Tuple[Path, Path]] = []
     if not ROOT.exists() or not ROOT.is_dir():
@@ -174,6 +175,10 @@ def discover_tasks() -> List[Tuple[Path, Path]]:
             for p in sorted(entry.iterdir()):
                 if p.is_file() and p.suffix.lower() in ACCEPTED_EXT:
                     dst = sub_out / (p.stem + ".png")
+                    # Skip processing if the image already exists
+                    if dst.exists():
+                        logger.info(f"Skipping {p.name}, already exists in {sub_out}")
+                        continue
                     tasks.append((p, dst))
     return tasks
 
