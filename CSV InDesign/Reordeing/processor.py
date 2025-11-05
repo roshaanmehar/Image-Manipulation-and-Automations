@@ -1,5 +1,4 @@
 import os
-import shutil
 import csv
 
 # Set paths
@@ -8,7 +7,6 @@ print(f"Current working directory: {root_directory}")  # Debugging: Verify curre
 
 master_csv_path = os.path.join(root_directory, 'master.csv')  # Path to master CSV in the root directory
 non_master_folder = root_directory  # Non-master CSV files are in the root directory as well
-barcode_source_folder = os.path.join(root_directory, 'barcodes_master')  # Ensure correct path to barcode folder
 error_log_path = os.path.join(root_directory, 'error_log.txt')  # Path to error log file in the root directory
 
 # Function to read the master CSV file and store data in a dictionary for quick lookup
@@ -19,7 +17,6 @@ def load_master_csv():
         for row in reader:
             master_data[row['Code (CM)']] = row
     return master_data
-
 
 # Function to process each non-master CSV
 def process_non_master_csv(non_master_file):
@@ -55,17 +52,10 @@ def process_non_master_csv(non_master_file):
                 if item_code in master_data:
                     row = master_data[item_code]
                     writer.writerow(row.values())  # Write row data to the output file
-                    
-                    # Process barcode images
-                    barcode_image_path = row['@barcodeImages'].replace('barcodes_master/', '')
-                    source_image = os.path.join(barcode_source_folder, barcode_image_path)
-                    destination_image = os.path.join(output_folder, barcode_image_path)
-                    
-                    if os.path.exists(source_image):
-                        shutil.copy(source_image, destination_image)
-                    else:
-                        error_log.append(f"Image not found for item code {item_code}: {source_image}")
                 else:
+                    # If item code is missing in the master CSV, write only the product code and leave other fields empty
+                    empty_row = [item_code] + [''] * (len(headers) - 1)
+                    writer.writerow(empty_row)
                     error_log.append(f"Item code {item_code} not found in master CSV.")
             
             # If there are errors, write them to the error log file
