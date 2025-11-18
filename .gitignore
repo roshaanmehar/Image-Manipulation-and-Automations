@@ -16,5 +16,3 @@ cat > .gitignore <<'EOF'
 EOF
 
 
-
-/node_modules

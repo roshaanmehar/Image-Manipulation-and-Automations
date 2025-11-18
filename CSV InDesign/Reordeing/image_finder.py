@@ -3,9 +3,10 @@ import shutil
 from pathlib import Path
 
 # === CONSTANTS ===
-ROOT_DIR = Path(__file__).resolve().parent      # root = where this script lives
-FRONT45_DIR = Path(r"C:\Roshaan\front45")       # source of *_front_45_raw.png files
-EXPECTED_SUFFIX = "_front_45_raw.png"
+ROOT_DIR = Path(__file__).resolve().parent
+FRONT45_DIR = Path(r"C:\Roshaan\front45")       # Source of *_front_45_raw.png files
+BARCODES_DIR = Path(r"C:\Roshaan\Code\CSV InDesign\barcodes_master")  # Source of barcode PNGs
+EXPECTED_SUFFIX = "_front_45_raw.png"           # Image filename pattern
 
 def clean_prefix(value: str, prefix: str) -> str:
     if not value:
@@ -14,6 +15,7 @@ def clean_prefix(value: str, prefix: str) -> str:
     return value[len(prefix):] if value.startswith(prefix) else value
 
 def build_index(folder: Path):
+    """Build a case-insensitive index of filenames for quick lookups."""
     if not folder.exists():
         print(f"[ERROR] Image source not found: {folder}")
         return {}
@@ -46,19 +48,20 @@ def process_csv(folder_name: str, csv_filename: str):
     print(f"[INFO] Using CSV     : {csv_path}")
     print(f"[INFO] Output (clean): {cleaned_csv_path}")
     print(f"[INFO] Images source : {FRONT45_DIR}")
+    print(f"[INFO] Barcodes dir  : {BARCODES_DIR}")
 
     image_index = build_index(FRONT45_DIR)
+    barcode_index = build_index(BARCODES_DIR)
 
-    copied = 0
-    missing = 0
+    copied_images = 0
+    copied_barcodes = 0
     missing_images = []
 
     with csv_path.open("r", encoding="utf-8-sig", newline="") as infile:
-        # restkey catches overflow columns instead of using None
         reader = csv.DictReader(infile, restkey="_EXTRA", restval="")
         fieldnames = [fn for fn in (reader.fieldnames or []) if fn is not None]
 
-        required = {"Code (CM)", "@images", "@barcodeImages"}
+        required = {"Code (CM)", "@images", "@barcodeImages", "Unit Barcode"}
         if not required.issubset(set(fieldnames)):
             print(f"[ERROR] Missing required columns. Found: {fieldnames}")
             return
@@ -68,16 +71,14 @@ def process_csv(folder_name: str, csv_filename: str):
             writer.writeheader()
 
             for row in reader:
-                # ignore overflow fields entirely
                 row.pop("_EXTRA", None)
-                # keep only known header fields
                 safe_row = {k: row.get(k, "") for k in fieldnames}
 
-                # clean columns
+                # Clean prefixes in image columns
                 safe_row["@images"] = clean_prefix(safe_row.get("@images", ""), "images/")
                 safe_row["@barcodeImages"] = clean_prefix(safe_row.get("@barcodeImages", ""), "barcodes_master/")
 
-                # copy image if exists
+                # --- Copy product image ---
                 code = (safe_row.get("Code (CM)") or "").strip()
                 if code:
                     expected_name = f"{code}{EXPECTED_SUFFIX}".lower()
@@ -85,25 +86,49 @@ def process_csv(folder_name: str, csv_filename: str):
                     if src:
                         dest = folder_path / src.name
                         try:
-                            shutil.copy2(src, dest)   # overwrite if present
-                            copied += 1
+                            shutil.copy2(src, dest)
+                            copied_images += 1
+                            safe_row["@images"] = src.name
                         except Exception as e:
                             print(f"[WARN] Copy failed for {src.name}: {e}")
                     else:
-                        missing += 1
                         missing_images.append(expected_name)
+                        safe_row["@images"] = ""
+                else:
+                    safe_row["@images"] = ""
+
+                # --- Copy barcode image ---
+                barcode = (safe_row.get("Unit Barcode") or "").strip()
+                if barcode:
+                    barcode_filename = f"{barcode}.png".lower()
+                    src_barcode = barcode_index.get(barcode_filename)
+                    if src_barcode:
+                        dest_barcode = folder_path / src_barcode.name
+                        try:
+                            shutil.copy2(src_barcode, dest_barcode)
+                            copied_barcodes += 1
+                            safe_row["@barcodeImages"] = src_barcode.name
+                        except Exception as e:
+                            print(f"[WARN] Copy failed for {src_barcode.name}: {e}")
+                    else:
+                        missing_images.append(barcode_filename)
+                        safe_row["@barcodeImages"] = ""
+                else:
+                    safe_row["@barcodeImages"] = ""
+
                 writer.writerow(safe_row)
 
-    # Write missing image names to a log
+    # Write missing images & barcodes to a log
     if missing_images:
         with missing_log_path.open("w", encoding="utf-8") as log_file:
-            log_file.write("Missing images (not found in front45):\n")
+            log_file.write("Missing images/barcodes (not found in sources):\n")
             for img in missing_images:
                 log_file.write(f"{img}\n")
 
     print(f"[DONE] {csv_path.name} processed.")
-    print(f"→ Copied images : {copied}")
-    print(f"→ Missing images: {missing} (logged in {missing_log_path})")
+    print(f"→ Copied product images : {copied_images}")
+    print(f"→ Copied barcode images  : {copied_barcodes}")
+    print(f"→ Missing items          : {len(missing_images)} (logged in {missing_log_path})")
 
 if __name__ == "__main__":
     folder = input("Folder in root (e.g. ENAMELWARE): ").strip()

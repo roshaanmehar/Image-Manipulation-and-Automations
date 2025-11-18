@@ -83,11 +83,11 @@ NTFY_URL = os.getenv("NTFY_URL") or (f"{NTFY_BASE}/{NTFY_TOPIC}" if NTFY_TOPIC e
 NTFY_USERNAME = os.getenv("NTFY_USERNAME")
 NTFY_PASSWORD = os.getenv("NTFY_PASSWORD")
 
-REFERENCE_ROOT = r"C:\Roshaan\remaining_unsorted"
+REFERENCE_ROOT = r"C:\Roshaan\OneDrive_1_18-11-2025\master"
 OUTPUT_ROOT = os.path.join(os.getcwd(), "output_images")
 STATE_FILE = "state.json"          # Tracks COMPLETED SKUs only
 ERROR_FILE = "error_log.json"      # Cumulative structured errors
-PROMPTS_FILE = "prompts.json"
+PROMPTS_FILE = "prompts_new.json"
 LOG_FILE = "run.log"
 
 MAX_REF_IMAGES = 6

@@ -25,10 +25,10 @@ import pandas as pd
 # ------------------------------------------------------------------------------
 
 CSV_PATH = Path("products.csv")  # must contain "Code (CM)" and "Name / Description"
-IMAGES_ROOT = Path(r"C:\Roshaan\converted_renamed_500_singles")      # your root with many subfolders
+IMAGES_ROOT = Path(r"C:\Roshaan\OneDrive_1_18-11-2025\master")  # your root with many subfolders
 OUT_DIR = Path(r".")          # results live here
-OUT_MASTER_JSON = OUT_DIR / "all_results.json"
-OUT_MASTER_CSV  = OUT_DIR / "all_results.csv"
+OUT_MASTER_JSON = OUT_DIR / "all_results_new.json"
+OUT_MASTER_CSV  = OUT_DIR / "all_results_new.csv"
 
 MODEL_NAME = "gemini-2.5-pro"     # or "gemini-2.5-flash"
 API_KEY = os.getenv("GOOGLE_API_KEY", "PUT_YOUR_KEY_HERE")
@@ -64,21 +64,28 @@ def extract_code_from_folder(folder_name: str) -> Optional[str]:
     Prefers patterns like LETTERS+DIGITS (e.g. COOBA0002).
     """
     name = folder_name.strip()
+    # If name is like "COOBA0002 - 6521083..." -> first chunk is "COOBA0002"
     first_chunk = re.split(r"[ \t\-_/]+", name)[0]
+
+    # Look for pattern like letters+digits
     m = re.search(r"[A-Za-z]{3,}\d{3,}", first_chunk)
     if m:
         return m.group(0).upper()
+
+    # Fallback: pick longest alphanumeric token
     tokens = re.findall(r"[A-Za-z0-9]+", name)
     if not tokens:
         return None
     tokens.sort(key=len, reverse=True)
     return tokens[0].upper()
 
+
 def load_catalog(csv_path: Path) -> pd.DataFrame:
     # utf-8-sig handles BOMs (common with Excel exports)
     df = pd.read_csv(csv_path, dtype=str, keep_default_na=False, encoding="utf-8-sig")
     df.columns = [c.strip() for c in df.columns]
     return df
+
 
 def find_row_by_code(df: pd.DataFrame, code: str) -> Optional[pd.Series]:
     col = df[COL_CODE].astype(str).str.strip().str.upper()
@@ -87,12 +94,14 @@ def find_row_by_code(df: pd.DataFrame, code: str) -> Optional[pd.Series]:
         return None
     return rows.iloc[0]
 
+
 def choose_folder_image(folder: Path) -> Optional[Path]:
     """Pick one image file from the folder (stable ordering)."""
     for p in sorted(folder.iterdir()):
         if p.is_file() and p.suffix.lower() in IMG_EXTS:
             return p
     return None
+
 
 def build_prompt(product_name: str, product_code: str) -> str:
     """
@@ -143,11 +152,14 @@ OUTPUT JSON ONLY (no markdown, no commentary).
 }}
 """
 
+
 def ensure_outputs():
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
     if not OUT_MASTER_JSON.exists():
         with open(OUT_MASTER_JSON, "w", encoding="utf-8") as jf:
             json.dump([], jf)
+
     if not OUT_MASTER_CSV.exists():
         with open(OUT_MASTER_CSV, "w", newline="", encoding="utf-8") as cf:
             writer = csv.writer(cf)
@@ -155,6 +167,7 @@ def ensure_outputs():
                 "Code (CM)", "Product Name", "Description",
                 "Ecomm Top", "Ecomm Side", "Ecomm 45", "Lifestyle"
             ])
+
 
 def append_results_row(data: Dict[str, Any]) -> None:
     """Append to master JSON and CSV immediately (crash-safe)."""
@@ -165,6 +178,7 @@ def append_results_row(data: Dict[str, Any]) -> None:
         jf.seek(0)
         json.dump(all_data, jf, ensure_ascii=False, indent=2)
         jf.truncate()
+
     # CSV
     with open(OUT_MASTER_CSV, "a", newline="", encoding="utf-8") as cf:
         w = csv.writer(cf)
@@ -178,6 +192,7 @@ def append_results_row(data: Dict[str, Any]) -> None:
             data.get("lifestyle_prompt", ""),
         ])
 
+
 def call_gemini(prompt: str, image_path: Path, model: str) -> Dict[str, Any]:
     """
     Upload the representative image (extra grounding) and request JSON.
@@ -187,12 +202,14 @@ def call_gemini(prompt: str, image_path: Path, model: str) -> Dict[str, Any]:
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             img_file = client.files.upload(file=image_path)
-            # >>> The key fix is here: contents is a list of File + str, not {"role":..., "parts":...}
+
+            # contents is a list: [File, text]
             resp = client.models.generate_content(
                 model=model,
                 contents=[img_file, prompt],
                 config={"response_mime_type": "application/json"},
             )
+
             text = getattr(resp, "text", None) or str(resp)
             data = json.loads(text)
 
@@ -203,6 +220,7 @@ def call_gemini(prompt: str, image_path: Path, model: str) -> Dict[str, Any]:
             for k in ["top", "side", "front_45"]:
                 if k not in data["ecomm_prompts"]:
                     raise ValueError(f"Missing e-comm angle: {k}")
+
             return data
 
         except Exception as e:
@@ -212,6 +230,7 @@ def call_gemini(prompt: str, image_path: Path, model: str) -> Dict[str, Any]:
                 time.sleep(RETRY_DELAY * attempt)
             else:
                 raise
+
 
 # ------------------------------------------------------------------------------
 # MAIN
@@ -223,23 +242,44 @@ def main():
 
     ensure_outputs()
     df = load_catalog(CSV_PATH)
+    print(f"[INFO] Loaded catalog from {CSV_PATH} with {len(df)} rows.")
 
+    # Gather subfolders once so we know the count
+    if not IMAGES_ROOT.exists():
+        raise SystemExit(f"IMAGES_ROOT does not exist: {IMAGES_ROOT}")
+
+    subfolders = sorted(p for p in IMAGES_ROOT.iterdir() if p.is_dir())
+    total_folders = len(subfolders)
+    print(f"[INFO] Found {total_folders} subfolder(s) under: {IMAGES_ROOT}")
+
+    # Counters for diagnostics
     processed = 0
+    skipped_no_code = 0
+    skipped_code_not_in_csv = 0
+    skipped_empty_name = 0
+    skipped_no_image = 0
+    gemini_failures = 0
+
     # Iterate only direct subfolders under IMAGES_ROOT
-    for folder in sorted(p for p in IMAGES_ROOT.iterdir() if p.is_dir()):
-        code = extract_code_from_folder(folder.name)
+    for folder in subfolders:
+        folder_name = folder.name
+
+        code = extract_code_from_folder(folder_name)
         if not code:
-            print(f"[SKIP] Could not derive code from folder: {folder.name}")
+            skipped_no_code += 1
+            print(f"[SKIP] Could not derive code from folder: {folder_name}")
             continue
 
         row = find_row_by_code(df, code)
         if row is None:
-            print(f"[SKIP] Code not found in CSV: {code}  (folder: {folder.name})")
+            skipped_code_not_in_csv += 1
+            print(f"[SKIP] Code not found in CSV: {code}  (folder: {folder_name})")
             continue
 
         product_name = str(row.get(COL_NAME, "")).strip()
         if not product_name:
-            print(f"[SKIP] Name/Description empty for code: {code}")
+            skipped_empty_name += 1
+            print(f"[SKIP] Name/Description empty for code: {code} (folder: {folder_name})")
             continue
 
         image_path = None
@@ -248,7 +288,8 @@ def main():
                 image_path = p
                 break
         if not image_path:
-            print(f"[SKIP] No image file found in: {folder}")
+            skipped_no_image += 1
+            print(f"[SKIP] No image file with allowed extension found in: {folder}")
             continue
 
         print(f"[INFO] Processing {code} — {product_name} ({image_path.name})")
@@ -257,7 +298,8 @@ def main():
         try:
             data = call_gemini(prompt, image_path, MODEL_NAME)
         except Exception as e:
-            print(f"[ERROR] Gemini failed for {code}: {e}")
+            gemini_failures += 1
+            print(f"[ERROR] Gemini failed for {code} (folder: {folder_name}): {e}")
             continue
 
         append_results_row(data)
@@ -268,7 +310,31 @@ def main():
             print("[TEST MODE] Stopping after one SKU.")
             break
 
-    print(f"Completed {processed} SKU(s). Results in: {OUT_DIR}")
+    # ------------------------------------------------------------------
+    # SUMMARY
+    # ------------------------------------------------------------------
+    accounted = (
+        processed
+        + skipped_no_code
+        + skipped_code_not_in_csv
+        + skipped_empty_name
+        + skipped_no_image
+        + gemini_failures
+    )
+    unaccounted = total_folders - accounted
+
+    print("\n========== SCAN SUMMARY ==========")
+    print(f"Root folder: {IMAGES_ROOT}")
+    print(f"Total subfolders found:           {total_folders}")
+    print(f"Successfully processed SKUs:      {processed}")
+    print(f"Skipped – could not derive code:  {skipped_no_code}")
+    print(f"Skipped – code not in CSV:        {skipped_code_not_in_csv}")
+    print(f"Skipped – empty name/description: {skipped_empty_name}")
+    print(f"Skipped – no image in folder:     {skipped_no_image}")
+    print(f"Failed – Gemini errors:           {gemini_failures}")
+    print(f"Unaccounted folders (logic bug?): {unaccounted}")
+    print("Results in:", OUT_DIR)
+    print("==================================")
 
 # ------------------------------------------------------------------------------
 # ENTRY
